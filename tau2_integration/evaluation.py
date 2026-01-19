@@ -34,6 +34,11 @@ class EvaluationMetrics:
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
+    
+    # Detailed Trace Metrics
+    llm_call_count: int = 0
+    avg_tokens_per_call: float = 0.0
+    trace_duration: float = 0.0
 
 
 def evaluate_run(
@@ -93,7 +98,7 @@ def evaluate_run(
     # Token usage (if available)
     tokens = result.token_usage or {}
     
-    return EvaluationMetrics(
+    metrics = EvaluationMetrics(
         task_success=result.success,
         goal_completion_rate=goal_rate,
         disruptions_triggered=disruptions,
@@ -105,7 +110,30 @@ def evaluate_run(
         input_tokens=tokens.get("input", 0),
         output_tokens=tokens.get("output", 0),
         total_tokens=tokens.get("total", 0),
+        llm_call_count=0, # Placeholder, will be updated if trace exists
+        avg_tokens_per_call=0.0,
+        trace_duration=0.0,
     )
+    
+    # Enrich with detailed trace if available
+    if result.trace:
+        steps = result.trace.get("steps", [])
+        llm_steps = [s for s in steps if s.get("type") == "llm"]
+        
+        metrics.llm_call_count = len(llm_steps)
+        metrics.trace_duration = result.trace.get("duration", 0.0)
+        
+        # If tokens were missing from top-level, try to sum from steps
+        if metrics.total_tokens == 0:
+            for s in steps:
+                t = s.get("tokens", {})
+                metrics.input_tokens += t.get("input", 0)
+                metrics.output_tokens += t.get("output", 0)
+                metrics.total_tokens += t.get("total", 0)
+        
+        metrics.avg_tokens_per_call = metrics.total_tokens / metrics.llm_call_count if metrics.llm_call_count > 0 else 0.0
+        
+    return metrics
 
 
 def _args_match(expected: Dict, actual: Dict) -> bool:
@@ -164,6 +192,9 @@ def compare_frameworks(
             "avg_tool_calls": sum(m.tool_call_count for m in metrics_list) / n,
             "avg_execution_time": sum(m.execution_time for m in metrics_list) / n,
             "avg_tokens": sum(m.total_tokens for m in metrics_list) / n,
+            "avg_llm_calls": sum(m.llm_call_count for m in metrics_list) / n,
+            "avg_tokens_per_call": sum(m.avg_tokens_per_call for m in metrics_list) / n,
+            "avg_trace_duration": sum(m.trace_duration for m in metrics_list) / n,
             
             "total_runs": n,
         }
@@ -187,7 +218,9 @@ def print_comparison_table(comparison: Dict[str, Any]) -> None:
         ("Goal Completion", "avg_goal_completion", "{:.1%}"),
         ("Rollback Integrity", "avg_rollback_integrity", "{:.1%}"),
         ("Avg Tool Calls", "avg_tool_calls", "{:.1f}"),
-        ("Avg Time (s)", "avg_execution_time", "{:.2f}"),
+        ("Avg LLM Calls", "avg_llm_calls", "{:.1f}"),
+        ("Avg Time (s)", "avg_trace_duration", "{:.2f}"),
+        ("Avg Tokens", "avg_tokens", "{:.0f}"),
     ]
     
     header = f"{'Framework':<15}"
@@ -200,7 +233,10 @@ def print_comparison_table(comparison: Dict[str, Any]) -> None:
     for framework, stats in comparison.items():
         row = f"{framework:<15}"
         for _, key, fmt in metrics:
-            value = stats.get(key, 0)
+            if hasattr(stats, key):
+                 value = getattr(stats, key)
+            else:
+                 value = stats.get(key, 0)
             row += f" {fmt.format(value):<18}"
         print(row)
     

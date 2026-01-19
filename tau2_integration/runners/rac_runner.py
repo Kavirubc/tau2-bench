@@ -139,8 +139,15 @@ class RACRunner(BaseFrameworkRunner):
                 error="langchain-google-genai not installed",
             )
         
+        # Initialize TraceRecorder
+        from ..tracing import TraceRecorder
+        from ..callbacks import TracingCallbackHandler
+        
+        recorder = TraceRecorder(task_id=task.task_id, framework="rac")
+        tracing_handler = TracingCallbackHandler(recorder)
+        
         # Setup callbacks for tracing
-        callbacks = []
+        callbacks = [tracing_handler]
         tracer = self._get_tracer()
         if tracer:
             callbacks.append(tracer)
@@ -187,12 +194,14 @@ class RACRunner(BaseFrameworkRunner):
             )
         except Exception as e:
             logger.error(f"Failed to create compensated agent: {e}")
+            recorder.finish(status="failed", metadata={"error": str(e)})
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
                 success=False,
                 execution_time=0,
                 error=f"Failed to create compensated agent: {e}",
+                trace=recorder.trace.to_dict(),
             )
         
         # Get middleware for tracking
@@ -257,6 +266,8 @@ class RACRunner(BaseFrameworkRunner):
                 except Exception as e:
                     logger.debug(f"Could not get compensation history: {e}")
             
+            recorder.finish(status="success")
+            
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
@@ -267,10 +278,12 @@ class RACRunner(BaseFrameworkRunner):
                 rollback_success=True,
                 messages=[self._message_to_dict(m) for m in all_messages],
                 raw_output=result,
+                trace=recorder.trace.to_dict(),
             )
             
         except Exception as e:
             logger.error(f"[RAC] Agent execution failed: {e}")
+            recorder.finish(status="failed", metadata={"error": str(e)})
             
             # Try to get compensation history even on failure
             comp_history = []
@@ -292,6 +305,7 @@ class RACRunner(BaseFrameworkRunner):
                 tool_calls=tool_calls_made,
                 compensation_actions=comp_history,
                 error=str(e),
+                trace=recorder.trace.to_dict(),
             )
     
     def _build_traced_system_prompt(self, task: Tau2TaskDefinition, policy: str) -> str:

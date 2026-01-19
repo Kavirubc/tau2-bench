@@ -94,12 +94,19 @@ class SagaLLMRunner(BaseFrameworkRunner):
         self._executed_actions = []
         compensation_actions = []
         
+        # Initialize TraceRecorder
+        from ..tracing import TraceRecorder
+        from ..callbacks import TracingCallbackHandler
+        
+        recorder = TraceRecorder(task_id=task.task_id, framework="sagallm")
+        tracing_handler = TracingCallbackHandler(recorder)
+
         try:
             # Phase 1: Planning
             logger.info("Phase 1: Planning")
             
             # Setup Langsmith tracing
-            callbacks = []
+            callbacks = [tracing_handler]
             try:
                 from langchain_core.tracers import LangChainTracer
                 api_key = os.getenv("LANGSMITH_API_KEY")
@@ -159,7 +166,7 @@ class SagaLLMRunner(BaseFrameworkRunner):
                     
                     # Phase 2: Execution
                     logger.info("Phase 2: Execution")
-                    execution_result = self._execute_plan(llm, plan, tools, policy)
+                    execution_result = self._execute_plan(llm, plan, tools, policy, recorder)
                     
                     # Capture messages for context
                     iter_messages = execution_result.get("messages", [])
@@ -169,6 +176,7 @@ class SagaLLMRunner(BaseFrameworkRunner):
                     
                     if execution_result["success"]:
                         logger.info("Plan executed successfully!")
+                        recorder.finish(status="success")
                         return RunnerResult(
                             task_id=task.task_id,
                             framework=self.framework_name,
@@ -177,17 +185,19 @@ class SagaLLMRunner(BaseFrameworkRunner):
                             tool_calls=all_executed_actions,
                             messages=execution_result.get("messages", []),
                             raw_output=execution_result,
+                            trace=recorder.trace.to_dict(),
                         )
                     
                     # Phase 3: Compensation (if execution failed)
                     logger.info(f"Execution failed: {execution_result.get('error')}. Phase 3: Compensation")
                     
-                    compensation_result = self._compensate(tools)
+                    compensation_result = self._compensate(tools, recorder)
                     comp_actions_this_iter = compensation_result.get("actions", [])
                     all_compensation_actions.extend(comp_actions_this_iter)
                     
                     if not compensation_result["success"]:
                         logger.error("Critical: Compensation failed. Cannot safely replan.")
+                        recorder.finish(status="failed", metadata={"error": f"Compensation failed: {execution_result.get('error')}"})
                         return RunnerResult(
                             task_id=task.task_id,
                             framework=self.framework_name,
@@ -196,6 +206,7 @@ class SagaLLMRunner(BaseFrameworkRunner):
                             tool_calls=all_executed_actions,
                             compensation_actions=all_compensation_actions,
                             error=f"Compensation failed: {execution_result.get('error')}",
+                            trace=recorder.trace.to_dict(),
                         )
 
                     if self.enable_replanning:
@@ -225,18 +236,22 @@ class SagaLLMRunner(BaseFrameworkRunner):
                     logger.error(f"Iteration {iteration} failed: {e}")
                     # Try last-ditch compensation
                     try:
-                        self._compensate(tools)
+                        self._compensate(tools, recorder)
                     except:
                         pass
+                    
+                    recorder.finish(status="failed", metadata={"error": str(e)})
                     return RunnerResult(
                         task_id=task.task_id,
                         framework=self.framework_name,
                         success=False,
                         execution_time=0,
                         error=str(e),
+                        trace=recorder.trace.to_dict(),
                     )
             
             # If we exited loop without success
+            recorder.finish(status="failed", metadata={"error": f"Max iterations ({self.max_iterations}) reached"})
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
@@ -245,16 +260,24 @@ class SagaLLMRunner(BaseFrameworkRunner):
                 tool_calls=all_executed_actions,
                 compensation_actions=all_compensation_actions,
                 error=f"Max iterations ({self.max_iterations}) reached without success.",
+                trace=recorder.trace.to_dict(),
             )
             
         except Exception as e:
             logger.error(f"SagaLLM runner failed: {e}")
+            if 'recorder' in locals():
+                 recorder.finish(status="failed", metadata={"error": str(e)})
+                 trace_dict = recorder.trace.to_dict()
+            else:
+                 trace_dict = None
+            
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
                 success=False,
                 execution_time=0,
                 error=str(e),
+                trace=trace_dict,
             )
     
     def _generate_plan(
@@ -317,6 +340,15 @@ Respond with ONLY the JSON list, no other text.
             planning_prompt += f"\n\nCRITICAL: Previous attempts failed. Improve your plan based on these errors:\n{error_history}\n"
         
         try:
+            # Trace LLM call manually
+            step_id = None
+            if run_config and "callbacks" in run_config and run_config["callbacks"]:
+                 # Try to find recorder in callbacks
+                 for cb in run_config["callbacks"]:
+                     if hasattr(cb, "recorder"):
+                         step_id = cb.recorder.start_step("llm", "plan_generation", planning_prompt)
+                         break
+            
             response = llm.invoke([
                 SystemMessage(content="You are a planning assistant."),
                 HumanMessage(content=planning_prompt),
@@ -346,6 +378,7 @@ Respond with ONLY the JSON list, no other text.
         plan: List[Dict[str, Any]],
         tools: Dict[str, Any],
         policy: str,
+        recorder: Any = None,
     ) -> Dict[str, Any]:
         """
         Execute the generated plan.
@@ -367,6 +400,7 @@ Respond with ONLY the JSON list, no other text.
         for idx, step in enumerate(plan):
             tool_name = step.get("tool")
             tool_args = step.get("args", {})
+            step_num = step.get("step")
             if step_num is None:
                 step_num = idx + 1
             
@@ -407,24 +441,26 @@ Respond with ONLY the JSON list, no other text.
 
                     except Exception as e:
                         logger.warning(f"Failed to substitute placeholder {arg_val}: {e}")
-                             ref_str = arg_val.replace("RESULT_FROM_STEP_", "")
-                             ref_step = int(ref_str)
-                             # ... legacy logic if needed (omitted for now as we prefer new style) ...
-                             pass 
-
-                    except Exception as e:
-                        logger.warning(f"Failed to substitute placeholder {arg_val}: {e}")
             
             if tool_name not in tools:
                 logger.warning(f"Unknown tool: {tool_name}")
                 continue
             
             try:
+                # Record tool start
+                step_id = None
+                if recorder:
+                    step_id = recorder.start_step("tool", tool_name, tool_args)
+                
                 # Execute the tool
                 if hasattr(tools[tool_name], "invoke"):
                     result = tools[tool_name].invoke(tool_args)
                 else:
                     result = tools[tool_name](**tool_args)
+                
+                # Record tool end
+                if recorder and step_id:
+                    recorder.end_step(step_id, output=str(result))
                 
                 # Store raw result for future steps
                 if step_num is not None:
@@ -454,6 +490,8 @@ Respond with ONLY the JSON list, no other text.
                 
             except ToolExecutionError as e:
                 logger.warning(f"Tool {tool_name} failed: {e}")
+                if recorder and step_id:
+                    recorder.end_step(step_id, output=None, error=str(e))
                 return {
                     "success": False,
                     "error": str(e),
@@ -462,6 +500,8 @@ Respond with ONLY the JSON list, no other text.
                 }
             except Exception as e:
                 logger.error(f"Tool {tool_name} raised exception: {e}")
+                if recorder and step_id:
+                    recorder.end_step(step_id, output=None, error=str(e))
                 return {
                     "success": False,
                     "error": str(e),
@@ -474,7 +514,7 @@ Respond with ONLY the JSON list, no other text.
             "messages": messages,
         }
     
-    def _compensate(self, tools: Dict[str, Any]) -> Dict[str, Any]:
+    def _compensate(self, tools: Dict[str, Any], recorder: Any = None) -> Dict[str, Any]:
         """
         Execute compensation actions for executed actions (in reverse order).
 
@@ -501,10 +541,20 @@ Respond with ONLY the JSON list, no other text.
                 comp_args = self._build_compensation_args(action)
                 
                 if comp_args:
+                    # Record compensation start
+                    step_id = None
+                    if recorder:
+                         step_id = recorder.start_step("compensation_tool", comp_tool, comp_args)
+
                     if hasattr(tools[comp_tool], "invoke"):
                          result = tools[comp_tool].invoke(comp_args)
                     else:
                          result = tools[comp_tool](**comp_args)
+                    
+                    # Record compensation end
+                    if recorder and step_id:
+                         recorder.end_step(step_id, output=str(result))
+
                     compensation_actions.append({
                         "original_tool": tool_name,
                         "compensation_tool": comp_tool,
@@ -515,6 +565,8 @@ Respond with ONLY the JSON list, no other text.
                     
             except Exception as e:
                 logger.error(f"Compensation for {tool_name} failed: {e}")
+                if recorder and step_id:
+                    recorder.end_step(step_id, output=None, error=str(e))
                 compensation_actions.append({
                     "original_tool": tool_name,
                     "compensation_tool": comp_tool,

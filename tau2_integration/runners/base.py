@@ -45,6 +45,9 @@ class RunnerResult:
     # Raw output
     raw_output: Optional[Any] = None
     messages: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Detailed Trace
+    trace: Optional[Dict[str, Any]] = None
 
 
 class BaseFrameworkRunner(ABC):
