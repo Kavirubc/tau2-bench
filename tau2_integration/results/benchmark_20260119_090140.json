@@ -1,0 +1,54 @@
+{
+  "timestamp": "2026-01-19T09:01:36.433989",
+  "config": {
+    "task_ids": [
+      "0"
+    ],
+    "frameworks": [
+      "langgraph",
+      "rac",
+      "sagallm"
+    ],
+    "disruption_scenario": null,
+    "trials": 1,
+    "model": "gemini-2.0-flash"
+  },
+  "results": [
+    {
+      "task_id": "0",
+      "framework": "langgraph",
+      "trial": 1,
+      "success": true,
+      "execution_time": 1.678783893585205,
+      "tool_calls": 0,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "error": null
+    },
+    {
+      "task_id": "0",
+      "framework": "rac",
+      "trial": 1,
+      "success": false,
+      "execution_time": 0.017406940460205078,
+      "tool_calls": 0,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "error": "react-agent-compensation not installed. Run: pip install react-agent-compensation"
+    },
+    {
+      "task_id": "0",
+      "framework": "sagallm",
+      "trial": 1,
+      "success": true,
+      "execution_time": 2.2797136306762695,
+      "tool_calls": 3,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "error": null
+    }
+  ]
+}

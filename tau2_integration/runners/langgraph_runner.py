@@ -1,16 +1,31 @@
 """
 LangGraph runner for τ²-bench (vanilla ReAct - no automatic compensation).
 
-Uses langchain create_react_agent for basic tool calling.
+Uses langchain create_react_agent with Gemini for basic tool calling.
 Relies purely on LLM reasoning for error recovery.
 """
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Initialize Langtrace for tracing
+try:
+    from langtrace_python_sdk import langtrace
+    langtrace.init(api_key=os.getenv("LANGTRACE_API_KEY"))
+except ImportError:
+    pass
+except Exception as e:
+    logging.warning(f"Langtrace initialization failed: {e}")
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool as langchain_tool
-from langchain_openai import ChatOpenAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from .base import BaseFrameworkRunner, RunnerResult
 from ..task_adapter import Tau2TaskDefinition, get_task_query
@@ -31,7 +46,7 @@ class LangGraphRunner(BaseFrameworkRunner):
     
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = "gemini-2.0-flash",
         max_iterations: int = 25,
         **kwargs
     ):
@@ -39,7 +54,7 @@ class LangGraphRunner(BaseFrameworkRunner):
         Initialize the LangGraph runner.
 
         Args:
-            model: LLM model to use.
+            model: LLM model to use (Gemini model name).
             max_iterations: Maximum ReAct iterations.
         """
         super().__init__(model=model, **kwargs)
@@ -49,9 +64,10 @@ class LangGraphRunner(BaseFrameworkRunner):
     def _get_llm(self):
         """Get or create the LLM instance."""
         if self._llm is None:
-            self._llm = ChatOpenAI(
+            self._llm = ChatGoogleGenerativeAI(
                 model=self.model,
                 temperature=0,
+                google_api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
             )
         return self._llm
     
@@ -105,9 +121,23 @@ class LangGraphRunner(BaseFrameworkRunner):
         all_messages = []
         
         try:
-            result = agent.invoke({
-                "messages": messages,
-            })
+            # Configure run with Langsmith metadata
+            run_config = {
+                "run_name": f"LangGraph-Vanilla-Task-{task.task_id}",
+                "tags": ["tau2-bench", "LangGraph", "framework:LangGraph-Vanilla", f"task-{task.task_id}"],
+                "metadata": {
+                    "task_id": task.task_id,
+                    "task_name": task.name,
+                    "framework": "LangGraph-Vanilla",
+                    "framework_name": "LangGraph ReAct (No Compensation)",
+                    "model": self.model,
+                },
+            }
+            
+            result = agent.invoke(
+                {"messages": messages},
+                config=run_config,
+            )
             
             all_messages = result.get("messages", [])
             tool_calls_made = self._extract_tool_calls_from_messages(all_messages)

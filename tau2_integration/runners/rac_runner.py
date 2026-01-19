@@ -2,10 +2,27 @@
 React-Agent-Compensation (RAC) runner for τ²-bench.
 
 Uses react-agent-compensation library for automatic rollback on failure.
+Leverages the langchain_adaptor module's create_compensated_agent.
+Includes comprehensive Langsmith tracing.
 """
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Initialize Langsmith tracing
+os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
+os.environ.setdefault("LANGCHAIN_PROJECT", os.getenv("LANGSMITH_PROJECT", "tau2-rac-benchmark"))
+
+from langchain_core.tracers import LangChainTracer
+from langchain_core.callbacks import CallbackManager
+from langchain_core.tools import StructuredTool
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from .base import BaseFrameworkRunner, RunnerResult
 from ..task_adapter import Tau2TaskDefinition, get_task_query
@@ -18,30 +35,58 @@ class RACRunner(BaseFrameworkRunner):
     """
     React-Agent-Compensation runner with automatic rollback.
     
-    Uses CompensationMiddleware to track actions and automatically
-    rollback on failure.
+    Uses create_compensated_agent from react-agent-compensation library
+    to create a LangGraph agent with compensation-aware tool wrapping.
+    Includes comprehensive Langsmith tracing for observability.
     """
     
     framework_name = "rac"
     
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = "gemini-2.0-flash",
         max_iterations: int = 25,
         auto_rollback: bool = True,
+        auto_recover: bool = True,
+        enable_tracing: bool = True,
         **kwargs
     ):
         """
         Initialize the RAC runner.
 
         Args:
-            model: LLM model to use.
+            model: LLM model to use (Gemini model name).
             max_iterations: Maximum ReAct iterations.
             auto_rollback: Enable automatic rollback on failure.
+            auto_recover: Enable automatic recovery (retry/alternatives).
+            enable_tracing: Enable Langsmith tracing.
         """
         super().__init__(model=model, **kwargs)
         self.max_iterations = max_iterations
         self.auto_rollback = auto_rollback
+        self.auto_recover = auto_recover
+        self.enable_tracing = enable_tracing
+        self._tracer = None
+    
+    def _get_tracer(self) -> Optional[LangChainTracer]:
+        """Get Langsmith tracer if enabled."""
+        if not self.enable_tracing:
+            return None
+        
+        if self._tracer is None:
+            try:
+                api_key = os.getenv("LANGSMITH_API_KEY")
+                if api_key:
+                    self._tracer = LangChainTracer(
+                        project_name=os.getenv("LANGSMITH_PROJECT", "tau2-rac-benchmark")
+                    )
+                    logger.info("Langsmith tracing enabled")
+                else:
+                    logger.warning("LANGSMITH_API_KEY not set, tracing disabled")
+            except Exception as e:
+                logger.warning(f"Failed to initialize Langsmith tracer: {e}")
+        
+        return self._tracer
     
     def run_task(
         self,
@@ -60,15 +105,19 @@ class RACRunner(BaseFrameworkRunner):
         Returns:
             RunnerResult with execution details.
         """
+        # Import RAC components
         try:
-            from react_agent_compensation import (
-                create_compensating_agent,
+            from react_agent_compensation.langchain_adaptor import (
+                create_compensated_agent,
+                get_compensation_middleware,
                 CompensationMiddleware,
-                RollbackFailure,
             )
-            from react_agent_compensation.strategies import RetryStrategy
-        except ImportError:
-            logger.error("react-agent-compensation not installed")
+            from react_agent_compensation.core import (
+                CompensationSchema,
+                RetryPolicy,
+            )
+        except ImportError as e:
+            logger.error(f"react-agent-compensation not installed: {e}")
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
@@ -77,42 +126,84 @@ class RACRunner(BaseFrameworkRunner):
                 error="react-agent-compensation not installed. Run: pip install react-agent-compensation",
             )
         
+        # Import LangChain components
         try:
-            from langchain_openai import ChatOpenAI
+            from langchain_google_genai import ChatGoogleGenerativeAI
         except ImportError:
-            logger.error("langchain-openai not installed")
+            logger.error("langchain-google-genai not installed")
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
                 success=False,
                 execution_time=0,
-                error="langchain-openai not installed",
+                error="langchain-google-genai not installed",
             )
         
-        # Create LLM
-        llm = ChatOpenAI(model=self.model, temperature=0)
+        # Setup callbacks for tracing
+        callbacks = []
+        tracer = self._get_tracer()
+        if tracer:
+            callbacks.append(tracer)
         
-        # Convert tools to langchain format with compensation mapping
-        langchain_tools = self._convert_tools_with_compensation(tools)
-        
-        # Create compensation middleware
-        middleware = CompensationMiddleware(
-            compensation_mapping=AIRLINE_COMPENSATION_MAPPING,
-            retry_policy=RetryStrategy(max_retries=2),
-            auto_recover=True,
-            auto_rollback=self.auto_rollback,
+        # Create LLM (Gemini) with tracing
+        llm = ChatGoogleGenerativeAI(
+            model=self.model,
+            temperature=0,
+            google_api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
+            callbacks=callbacks,
         )
         
-        # Create agent with compensation
-        agent = create_compensating_agent(
-            llm=llm,
-            tools=langchain_tools,
-            middleware=middleware,
+        # Convert tools to LangChain StructuredTool format
+        langchain_tools = self._convert_tools_to_langchain(tools)
+        
+        # Define compensation schemas for airline tools
+        compensation_schemas = {
+            "book_reservation": CompensationSchema(
+                param_mapping={"reservation_id": "result.reservation_id"},
+            ),
+        }
+        
+        # Create retry policy
+        retry_policy = RetryPolicy(
+            max_retries=2,
+            base_delay=0.5,
+            max_delay=5.0,
         )
+        
+        # Build system prompt with task context
+        system_prompt = self._build_traced_system_prompt(task, policy)
+        
+        # Create compensated agent using RAC's factory function
+        try:
+            agent = create_compensated_agent(
+                model=llm,
+                tools=langchain_tools,
+                compensation_mapping=AIRLINE_COMPENSATION_MAPPING,
+                retry_policy=retry_policy,
+                compensation_schemas=compensation_schemas,
+                auto_rollback=self.auto_rollback,
+                auto_recover=self.auto_recover,
+                system_prompt=system_prompt,
+            )
+        except Exception as e:
+            logger.error(f"Failed to create compensated agent: {e}")
+            return RunnerResult(
+                task_id=task.task_id,
+                framework=self.framework_name,
+                success=False,
+                execution_time=0,
+                error=f"Failed to create compensated agent: {e}",
+            )
+        
+        # Get middleware for tracking
+        middleware = get_compensation_middleware(agent)
         
         # Build messages
-        system_prompt = self.build_system_prompt(policy)
         user_query = get_task_query(task)
+        
+        # Log task start for tracing
+        logger.info(f"[RAC] Starting task {task.task_id}: {task.name[:50]}...")
+        logger.info(f"[RAC] Available tools: {list(tools.keys())}")
         
         # Execute agent
         tool_calls_made = []
@@ -121,14 +212,50 @@ class RACRunner(BaseFrameworkRunner):
         rollback_success = False
         
         try:
-            result = agent.invoke({
-                "input": user_query,
-                "system": system_prompt,
-            })
+            # Configure run with metadata for Langsmith
+            run_config = {
+                "callbacks": callbacks,
+                "run_name": f"RAC-Task-{task.task_id}",
+                "tags": ["tau2-bench", "RAC", "framework:RAC", f"task-{task.task_id}"],
+                "metadata": {
+                    "task_id": task.task_id,
+                    "task_name": task.name,
+                    "framework": "RAC",
+                    "framework_name": "React-Agent-Compensation",
+                    "model": self.model,
+                    "auto_rollback": self.auto_rollback,
+                    "auto_recover": self.auto_recover,
+                },
+            }
+            
+            result = agent.invoke(
+                {"messages": [HumanMessage(content=user_query)]},
+                config=run_config,
+            )
             
             all_messages = result.get("messages", [])
             tool_calls_made = self._extract_tool_calls(all_messages)
-            compensation_actions = middleware.get_compensation_history()
+            
+            # Log tool calls for tracing
+            logger.info(f"[RAC] Completed with {len(tool_calls_made)} tool calls")
+            for i, tc in enumerate(tool_calls_made):
+                logger.info(f"[RAC]   Tool {i+1}: {tc.get('name')} - {tc.get('arguments')}")
+            
+            # Get compensation history from middleware if available
+            if middleware:
+                try:
+                    log_snapshot = middleware.transaction_log.snapshot()
+                    for rid, record in log_snapshot.items():
+                        status_str = str(record.status).lower() if hasattr(record, 'status') else ""
+                        if 'compensated' in status_str:
+                            compensation_actions.append({
+                                "action": record.action,
+                                "status": str(record.status),
+                                "compensator": record.compensator,
+                            })
+                        logger.info(f"[RAC] Transaction: {record.action} -> {record.status}")
+                except Exception as e:
+                    logger.debug(f"Could not get compensation history: {e}")
             
             return RunnerResult(
                 task_id=task.task_id,
@@ -142,26 +269,20 @@ class RACRunner(BaseFrameworkRunner):
                 raw_output=result,
             )
             
-        except RollbackFailure as e:
-            logger.error(f"Rollback failed: {e}")
-            return RunnerResult(
-                task_id=task.task_id,
-                framework=self.framework_name,
-                success=False,
-                execution_time=0,
-                tool_calls=tool_calls_made,
-                compensation_actions=middleware.get_compensation_history(),
-                rollback_success=False,
-                error=f"Rollback failed: {e}",
-            )
         except Exception as e:
-            logger.error(f"Agent execution failed: {e}")
+            logger.error(f"[RAC] Agent execution failed: {e}")
+            
             # Try to get compensation history even on failure
             comp_history = []
-            try:
-                comp_history = middleware.get_compensation_history()
-            except:
-                pass
+            if middleware:
+                try:
+                    log_snapshot = middleware.transaction_log.snapshot()
+                    comp_history = [
+                        {"action": r.action, "status": str(r.status)}
+                        for r in log_snapshot.values()
+                    ]
+                except:
+                    pass
             
             return RunnerResult(
                 task_id=task.task_id,
@@ -173,24 +294,37 @@ class RACRunner(BaseFrameworkRunner):
                 error=str(e),
             )
     
-    def _convert_tools_with_compensation(
+    def _build_traced_system_prompt(self, task: Tau2TaskDefinition, policy: str) -> str:
+        """Build system prompt with task context for better tracing."""
+        base_prompt = self.build_system_prompt(policy)
+        
+        # Add task context
+        return f"""{base_prompt}
+
+CURRENT TASK: {task.name}
+TASK ID: {task.task_id}
+CATEGORY: {task.category.value if hasattr(task.category, 'value') else task.category}
+
+Think step by step and use the available tools to complete the user's request.
+After each tool call, evaluate the result and decide on the next action.
+"""
+    
+    def _convert_tools_to_langchain(
         self, 
         tools: Dict[str, Any]
-    ) -> List[Any]:
-        """Convert tools with compensation metadata."""
-        from langchain_core.tools import tool as langchain_tool
-        
+    ) -> List[StructuredTool]:
+        """Convert τ²-bench tools to LangChain StructuredTool format."""
         langchain_tools = []
         
         for name, func in tools.items():
-            wrapped = langchain_tool(func)
-            wrapped.name = name
-            
-            # Add compensation metadata
-            if name in AIRLINE_COMPENSATION_MAPPING:
-                wrapped.compensation_action = AIRLINE_COMPENSATION_MAPPING[name]
-            
-            langchain_tools.append(wrapped)
+            # Create a StructuredTool from the method
+            tool = StructuredTool.from_function(
+                func=func,
+                name=name,
+                description=func.__doc__ or f"Tool: {name}",
+            )
+            langchain_tools.append(tool)
+            logger.debug(f"[RAC] Converted tool: {name}")
         
         return langchain_tools
     
@@ -199,22 +333,35 @@ class RACRunner(BaseFrameworkRunner):
         tool_calls = []
         
         for msg in messages:
+            # Check for tool_calls attribute (AIMessage with tool calls)
             if hasattr(msg, "tool_calls") and msg.tool_calls:
                 for tc in msg.tool_calls:
                     tool_calls.append({
                         "name": tc.get("name"),
                         "arguments": tc.get("args", {}),
                     })
+            
+            # Also check for tool messages (results)
+            if hasattr(msg, "type") and msg.type == "tool":
+                # This is a tool result message
+                pass
         
         return tool_calls
     
     def _message_to_dict(self, msg: Any) -> Dict[str, Any]:
         """Convert a message to dictionary format."""
-        if hasattr(msg, "dict"):
-            return msg.dict()
-        elif hasattr(msg, "content"):
-            return {
-                "role": getattr(msg, "type", "unknown"),
-                "content": msg.content,
-            }
-        return {"content": str(msg)}
+        result = {}
+        
+        if hasattr(msg, "type"):
+            result["type"] = msg.type
+        if hasattr(msg, "content"):
+            result["content"] = str(msg.content)[:500]  # Truncate long content
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            result["tool_calls"] = [
+                {"name": tc.get("name"), "args": tc.get("args", {})}
+                for tc in msg.tool_calls
+            ]
+        if hasattr(msg, "name"):
+            result["name"] = msg.name
+        
+        return result

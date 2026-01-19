@@ -5,7 +5,22 @@ Implements the 3-phase plan-execute-compensate workflow from SagaLLM.
 """
 
 import logging
+import os
 from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Initialize Langtrace for tracing
+try:
+    from langtrace_python_sdk import langtrace
+    langtrace.init(api_key=os.getenv("LANGTRACE_API_KEY"))
+except ImportError:
+    pass
+except Exception as e:
+    logging.warning(f"Langtrace initialization failed: {e}")
 
 from .base import BaseFrameworkRunner, RunnerResult
 from ..task_adapter import Tau2TaskDefinition, get_task_query
@@ -28,7 +43,7 @@ class SagaLLMRunner(BaseFrameworkRunner):
     
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = "gemini-2.0-flash",
         max_iterations: int = 25,
         enable_replanning: bool = True,
         **kwargs
@@ -37,7 +52,7 @@ class SagaLLMRunner(BaseFrameworkRunner):
         Initialize the SagaLLM runner.
 
         Args:
-            model: LLM model to use.
+            model: LLM model to use (Gemini model name).
             max_iterations: Maximum execution iterations.
             enable_replanning: Enable replanning after compensation.
         """
@@ -64,16 +79,16 @@ class SagaLLMRunner(BaseFrameworkRunner):
             RunnerResult with execution details.
         """
         try:
-            from langchain_openai import ChatOpenAI
+            from langchain_google_genai import ChatGoogleGenerativeAI
             from langchain_core.messages import HumanMessage, SystemMessage
         except ImportError:
-            logger.error("langchain-openai not installed")
+            logger.error("langchain-google-genai not installed")
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
                 success=False,
                 execution_time=0,
-                error="langchain-openai not installed",
+                error="langchain-google-genai not installed",
             )
         
         self._executed_actions = []
@@ -82,8 +97,42 @@ class SagaLLMRunner(BaseFrameworkRunner):
         try:
             # Phase 1: Planning
             logger.info("Phase 1: Planning")
-            llm = ChatOpenAI(model=self.model, temperature=0)
-            plan = self._generate_plan(llm, task, tools, policy)
+            
+            # Setup Langsmith tracing
+            callbacks = []
+            try:
+                from langchain_core.tracers import LangChainTracer
+                api_key = os.getenv("LANGSMITH_API_KEY")
+                if api_key:
+                    tracer = LangChainTracer(
+                        project_name=os.getenv("LANGSMITH_PROJECT", "tau2-saga-benchmark")
+                    )
+                    callbacks.append(tracer)
+            except Exception as e:
+                logger.debug(f"Langsmith tracer not available: {e}")
+            
+            # Configure run metadata for Langsmith
+            run_config = {
+                "run_name": f"SagaLLM-Task-{task.task_id}",
+                "tags": ["tau2-bench", "SagaLLM", "framework:SagaLLM", f"task-{task.task_id}"],
+                "metadata": {
+                    "task_id": task.task_id,
+                    "task_name": task.name,
+                    "framework": "SagaLLM",
+                    "framework_name": "SagaLLM 3-Phase (Plan-Execute-Compensate)",
+                    "model": self.model,
+                    "enable_replanning": self.enable_replanning,
+                },
+                "callbacks": callbacks,
+            }
+            
+            llm = ChatGoogleGenerativeAI(
+                model=self.model,
+                temperature=0,
+                google_api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
+                callbacks=callbacks,
+            )
+            plan = self._generate_plan(llm, task, tools, policy, run_config)
             
             if not plan:
                 return RunnerResult(
@@ -157,6 +206,7 @@ class SagaLLMRunner(BaseFrameworkRunner):
         task: Tau2TaskDefinition,
         tools: Dict[str, Any],
         policy: str,
+        run_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Generate an action plan using the LLM.
@@ -166,6 +216,7 @@ class SagaLLMRunner(BaseFrameworkRunner):
             task: Task definition.
             tools: Available tools.
             policy: Policy text.
+            run_config: Optional Langsmith run config.
 
         Returns:
             List of planned actions, or None if planning fails.

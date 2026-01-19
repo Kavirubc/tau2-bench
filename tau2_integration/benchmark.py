@@ -8,10 +8,16 @@ and collects comparative metrics.
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
 
 # Add paths for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -22,6 +28,7 @@ from tau2_integration.task_adapter import (
     add_disruption_scenarios,
     Tau2TaskDefinition,
 )
+from tau2_integration.wrapped_tools import wrap_tool_with_disruption
 from tau2_integration.runners.base import RunnerResult
 from tau2_integration.runners.langgraph_runner import LangGraphRunner
 from tau2_integration.runners.rac_runner import RACRunner
@@ -37,8 +44,21 @@ logger = logging.getLogger("tau2_integration.benchmark")
 DEFAULT_DATA_DIR = Path(__file__).parent.parent / "data" / "tau2" / "domains" / "airline"
 DEFAULT_OUTPUT_DIR = Path(__file__).parent / "results"
 
+# Default model
+DEFAULT_MODEL = "gemini-2.0-flash"
 
-def get_runner(framework: str, model: str = "gpt-4o-mini"):
+# Write operations that need rollback tracking
+WRITE_OPERATIONS = {
+    "book_reservation", 
+    "cancel_reservation", 
+    "update_reservation_flights", 
+    "update_reservation_baggages",
+    "update_reservation_passengers",
+    "send_certificate",
+}
+
+
+def get_runner(framework: str, model: str = DEFAULT_MODEL):
     """Get a runner instance for the specified framework."""
     runners = {
         "langgraph": LangGraphRunner,
@@ -52,8 +72,12 @@ def get_runner(framework: str, model: str = "gpt-4o-mini"):
     return runners[framework](model=model)
 
 
-def load_airline_tools():
-    """Load τ²-bench airline tools."""
+def load_airline_tools(wrap_with_disruption: bool = True):
+    """Load τ²-bench airline tools.
+    
+    Args:
+        wrap_with_disruption: Whether to wrap tools with disruption injection.
+    """
     try:
         from tau2.domains.airline.tools import AirlineTools
         from tau2.domains.airline.data_model import FlightDB
@@ -69,8 +93,16 @@ def load_airline_tools():
                 continue
             attr = getattr(toolkit, name)
             if callable(attr) and hasattr(attr, "__self__"):
-                tools[name] = attr
+                if wrap_with_disruption:
+                    # Wrap with disruption injection
+                    # Track write operations for potential rollback
+                    is_write_op = name in WRITE_OPERATIONS
+                    tools[name] = wrap_tool_with_disruption(attr, name, track_for_rollback=is_write_op)
+                    logger.debug(f"Wrapped tool with disruption: {name} (track={is_write_op})")
+                else:
+                    tools[name] = attr
         
+        logger.info(f"Loaded {len(tools)} tools (disruption_wrap={wrap_with_disruption})")
         return tools, toolkit
         
     except ImportError as e:
@@ -92,7 +124,7 @@ def run_benchmark(
     frameworks: List[str],
     disruption_scenario: Optional[str] = None,
     trials: int = 1,
-    model: str = "gpt-4o-mini",
+    model: str = DEFAULT_MODEL,
     output_dir: Optional[Path] = None,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
@@ -124,8 +156,9 @@ def run_benchmark(
     
     logger.info(f"Loaded {len(tasks)} tasks: {[t.task_id for t in tasks]}")
     
-    # Load tools and policy
-    tools, toolkit = load_airline_tools()
+    # Load tools with disruption wrapping
+    wrap_disruption = disruption_scenario is not None
+    tools, toolkit = load_airline_tools(wrap_with_disruption=wrap_disruption)
     if not tools:
         return {"error": "Failed to load airline tools"}
     
@@ -287,7 +320,7 @@ def main():
         "--model", "-m",
         type=str,
         help="LLM model to use",
-        default="gpt-4o-mini",
+        default=DEFAULT_MODEL,
     )
     parser.add_argument(
         "--output", "-o",
