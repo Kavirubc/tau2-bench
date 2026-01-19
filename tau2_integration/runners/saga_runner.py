@@ -132,71 +132,128 @@ class SagaLLMRunner(BaseFrameworkRunner):
                 google_api_key=os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY"),
                 callbacks=callbacks,
             )
-            plan = self._generate_plan(llm, task, tools, policy, run_config)
+
+            iteration = 0
+            failure_context = []
+            all_executed_actions = []
+            all_compensation_actions = []
             
-            if not plan:
-                return RunnerResult(
-                    task_id=task.task_id,
-                    framework=self.framework_name,
-                    success=False,
-                    execution_time=0,
-                    error="Failed to generate plan",
-                )
+            while iteration < self.max_iterations:
+                iteration += 1
+                logger.info(f"=== SagaLLM Iteration {iteration}/{self.max_iterations} ===")
+                
+                self._executed_actions = [] # Reset for this iteration
+                
+                try:
+                    # Phase 1: Planning (with context from previous failures)
+                    logger.info("Phase 1: Planning")
+                    
+                    # Update run name for iteration
+                    run_config["run_name"] = f"SagaLLM-Task-{task.task_id}-Iter{iteration}"
+                    
+                    plan = self._generate_plan(llm, task, tools, policy, run_config, failure_context)
+                    
+                    if not plan:
+                        logger.warning("Planning failed, stopping.")
+                        break
+                    
+                    # Phase 2: Execution
+                    logger.info("Phase 2: Execution")
+                    execution_result = self._execute_plan(llm, plan, tools, policy)
+                    
+                    # Capture messages for context
+                    iter_messages = execution_result.get("messages", [])
+                    
+                    # Collect actions from this attempt
+                    all_executed_actions.extend(self._executed_actions)
+                    
+                    if execution_result["success"]:
+                        logger.info("Plan executed successfully!")
+                        return RunnerResult(
+                            task_id=task.task_id,
+                            framework=self.framework_name,
+                            success=True,
+                            execution_time=0,
+                            tool_calls=all_executed_actions,
+                            messages=execution_result.get("messages", []),
+                            raw_output=execution_result,
+                        )
+                    
+                    # Phase 3: Compensation (if execution failed)
+                    logger.info(f"Execution failed: {execution_result.get('error')}. Phase 3: Compensation")
+                    
+                    compensation_result = self._compensate(tools)
+                    comp_actions_this_iter = compensation_result.get("actions", [])
+                    all_compensation_actions.extend(comp_actions_this_iter)
+                    
+                    if not compensation_result["success"]:
+                        logger.error("Critical: Compensation failed. Cannot safely replan.")
+                        return RunnerResult(
+                            task_id=task.task_id,
+                            framework=self.framework_name,
+                            success=False,
+                            execution_time=0,
+                            tool_calls=all_executed_actions,
+                            compensation_actions=all_compensation_actions,
+                            error=f"Compensation failed: {execution_result.get('error')}",
+                        )
+
+                    if self.enable_replanning:
+                        logger.info("Compensation successful. Preparing to replan.")
+                        failure_reason = execution_result.get("error", "Unknown error")
+                        failed_step = execution_result.get("failed_step", "?")
+                        
+                        # Add to context
+                        context_msg = f"Attempt {iteration} failed at step {failed_step}: {failure_reason}. " \
+                                      f"The system has been rolled back. You must try a DIFFERENT approach."
+                        failure_context.append(context_msg)
+                        
+                        # Also add the tool outputs from this attempt so the planner can see search results
+                        # Filter for 'tool' messages
+                        tool_outputs = [
+                            f"Tool '{m['tool']}' output: {m['content']}" 
+                            for m in iter_messages 
+                            if m.get("role") == "tool"
+                        ]
+                        if tool_outputs:
+                            failure_context.append("Information gathered in this attempt:\n" + "\n".join(tool_outputs))
+                    else:
+                        logger.info("Replanning disabled. Stopping.")
+                        break
+                        
+                except Exception as e:
+                    logger.error(f"Iteration {iteration} failed: {e}")
+                    # Try last-ditch compensation
+                    try:
+                        self._compensate(tools)
+                    except:
+                        pass
+                    return RunnerResult(
+                        task_id=task.task_id,
+                        framework=self.framework_name,
+                        success=False,
+                        execution_time=0,
+                        error=str(e),
+                    )
             
-            # Phase 2: Execution
-            logger.info("Phase 2: Execution")
-            execution_result = self._execute_plan(llm, plan, tools, policy)
-            
-            if execution_result["success"]:
-                return RunnerResult(
-                    task_id=task.task_id,
-                    framework=self.framework_name,
-                    success=True,
-                    execution_time=0,
-                    tool_calls=self._executed_actions,
-                    messages=execution_result.get("messages", []),
-                    raw_output=execution_result,
-                )
-            
-            # Phase 3: Compensation (if execution failed)
-            logger.info("Phase 3: Compensation")
-            compensation_result = self._compensate(tools)
-            compensation_actions = compensation_result.get("actions", [])
-            
-            # Optionally replan after compensation
-            if self.enable_replanning and compensation_result["success"]:
-                logger.info("Replanning after compensation")
-                # Could implement replanning here
-                pass
-            
+            # If we exited loop without success
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
                 success=False,
                 execution_time=0,
-                tool_calls=self._executed_actions,
-                compensation_actions=compensation_actions,
-                rollback_success=compensation_result["success"],
-                error=execution_result.get("error"),
+                tool_calls=all_executed_actions,
+                compensation_actions=all_compensation_actions,
+                error=f"Max iterations ({self.max_iterations}) reached without success.",
             )
             
         except Exception as e:
-            logger.error(f"SagaLLM execution failed: {e}")
-            
-            # Attempt compensation on exception
-            try:
-                compensation_result = self._compensate(tools)
-                compensation_actions = compensation_result.get("actions", [])
-            except Exception as comp_error:
-                logger.error(f"Compensation also failed: {comp_error}")
-            
+            logger.error(f"SagaLLM runner failed: {e}")
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
                 success=False,
                 execution_time=0,
-                tool_calls=self._executed_actions,
-                compensation_actions=compensation_actions,
                 error=str(e),
             )
     
@@ -207,6 +264,7 @@ class SagaLLMRunner(BaseFrameworkRunner):
         tools: Dict[str, Any],
         policy: str,
         run_config: Optional[Dict[str, Any]] = None,
+        failure_context: List[str] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """
         Generate an action plan using the LLM.
@@ -238,13 +296,25 @@ User request:
 {user_query}
 
 Generate a JSON list of actions, where each action has:
-- "step": step number
 - "tool": tool name to call
+- "args": dictionary of arguments matching the tool schema EXACTLY.
+
+IMPORTANT:
+1. Use ONLY the arguments defined in the "Available tools" section above.
+2. Do NOT invent new arguments (e.g., do not use "flight_number" if the schema says "flight_id").
+3. Failure to follow the schema will cause the plan to fail.
+4. If a value is unknown (like a flight ID from a future search), use a placeholder string like "{{flight_id_from_step_1}}".
+5. If a tool takes a SINGLE string argument (like "passenger_name"), do NOT pass a list. Create multiple separate steps (one for each item).
 - "args": arguments for the tool
 - "reasoning": why this step is needed
 
 Respond with ONLY the JSON list, no other text.
 """
+        
+        # Add failure context if available
+        if failure_context:
+            error_history = "\n".join([f"- {err}" for err in failure_context])
+            planning_prompt += f"\n\nCRITICAL: Previous attempts failed. Improve your plan based on these errors:\n{error_history}\n"
         
         try:
             response = llm.invoke([
@@ -292,10 +362,58 @@ Respond with ONLY the JSON list, no other text.
         from ..wrapped_tools import ToolExecutionError
         
         messages = []
+        step_results = {} # Map step number -> raw result for substitution
         
-        for step in plan:
+        for idx, step in enumerate(plan):
             tool_name = step.get("tool")
             tool_args = step.get("args", {})
+            if step_num is None:
+                step_num = idx + 1
+            
+            # Substitute placeholders with actual results using step_results
+            for arg_key, arg_val in tool_args.items():
+                if isinstance(arg_val, str):
+                    try:
+                        # New style: {{flight_id_from_step_1}}
+                        if "from_step_" in arg_val:
+                            import re
+                            match = re.search(r"from_step_(\d+)", arg_val)
+                            if match:
+                                ref_step = int(match.group(1))
+                                
+                                if ref_step in step_results:
+                                    prev_result = step_results[ref_step]
+                                    
+                                    # Handle different result types (list vs dict)
+                                    if isinstance(prev_result, list) and len(prev_result) > 0:
+                                        # If previous result is a list (like search_flights), pick the first item
+                                        item = prev_result[0]
+                                        if isinstance(item, dict):
+                                            # Try to match key requested
+                                            if "flight_id" in arg_key or "id" in arg_key:
+                                                tool_args[arg_key] = item.get("id") or item.get("flight_id")
+                                    elif isinstance(prev_result, dict):
+                                        # If previous result is a dict (like book_flight)
+                                        if "booking_id" in arg_key:
+                                            tool_args[arg_key] = prev_result.get("booking_id")
+                                        elif "payment_id" in arg_key:
+                                            tool_args[arg_key] = prev_result.get("transaction_id")
+                        
+                        # Old style: RESULT_FROM_STEP_1
+                        elif "RESULT_FROM_STEP_" in arg_val:
+                             ref_str = arg_val.replace("RESULT_FROM_STEP_", "")
+                             ref_step = int(ref_str)
+                             pass 
+
+                    except Exception as e:
+                        logger.warning(f"Failed to substitute placeholder {arg_val}: {e}")
+                             ref_str = arg_val.replace("RESULT_FROM_STEP_", "")
+                             ref_step = int(ref_str)
+                             # ... legacy logic if needed (omitted for now as we prefer new style) ...
+                             pass 
+
+                    except Exception as e:
+                        logger.warning(f"Failed to substitute placeholder {arg_val}: {e}")
             
             if tool_name not in tools:
                 logger.warning(f"Unknown tool: {tool_name}")
@@ -303,7 +421,22 @@ Respond with ONLY the JSON list, no other text.
             
             try:
                 # Execute the tool
-                result = tools[tool_name](**tool_args)
+                if hasattr(tools[tool_name], "invoke"):
+                    result = tools[tool_name].invoke(tool_args)
+                else:
+                    result = tools[tool_name](**tool_args)
+                
+                # Store raw result for future steps
+                if step_num is not None:
+                    step_results[step_num] = result
+                
+                # Check for logical failure (e.g. status='failed')
+                if isinstance(result, dict):
+                    if result.get("status") == "failed":
+                        error_msg = result.get("error", "Tool reported failure")
+                        raise ToolExecutionError(error_msg)
+                    if "error" in result and result["error"]:
+                        raise ToolExecutionError(result["error"])
                 
                 # Track executed action
                 self._executed_actions.append({
@@ -368,7 +501,10 @@ Respond with ONLY the JSON list, no other text.
                 comp_args = self._build_compensation_args(action)
                 
                 if comp_args:
-                    result = tools[comp_tool](**comp_args)
+                    if hasattr(tools[comp_tool], "invoke"):
+                         result = tools[comp_tool].invoke(comp_args)
+                    else:
+                         result = tools[comp_tool](**comp_args)
                     compensation_actions.append({
                         "original_tool": tool_name,
                         "compensation_tool": comp_tool,
@@ -400,14 +536,22 @@ Respond with ONLY the JSON list, no other text.
         tool_name = action["tool"]
         
         if tool_name == "book_reservation":
-            # Extract reservation_id from result
+            # Extract reservation_id from result (legacy tau2 tool)
             result = action.get("result", "")
-            # Try to parse reservation_id from result string
             if "reservation_id" in result:
                 import re
                 match = re.search(r"reservation_id['\"]?\s*[:=]\s*['\"]?(\w+)", result)
                 if match:
                     return {"reservation_id": match.group(1)}
+        
+        elif tool_name == "book_flight":
+            # Extract booking_id from result (new demo tool)
+            result = action.get("result", "")
+            if "booking_id" in result:
+                import re
+                match = re.search(r"booking_id['\"]?\s*[:=]\s*['\"]?([\w-]+)", result)
+                if match:
+                    return {"booking_id": match.group(1)}
         
         return None
     

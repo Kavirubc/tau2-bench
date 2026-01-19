@@ -307,6 +307,12 @@ CATEGORY: {task.category.value if hasattr(task.category, 'value') else task.cate
 
 Think step by step and use the available tools to complete the user's request.
 After each tool call, evaluate the result and decide on the next action.
+
+IMPORTANT:
+1. If a tool fails or constraints are not met, DO NOT GIVE UP.
+2. Rollback any partial state (this happens automatically), then PLAN AN ALTERNATIVE.
+3. You must continue trying different approaches (e.g., flight options, parameters) until the User's Goal is fully satisfied.
+4. Only signal "Final Answer" when the request is TRULY complete.
 """
     
     def _convert_tools_to_langchain(
