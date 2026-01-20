@@ -80,6 +80,142 @@ AIRLINE_DISRUPTION_TOOL_MAPPING = {
     },
 }
 
+# Retail domain disruption mappings
+RETAIL_DISRUPTION_TOOL_MAPPING = {
+    "payment_gateway_timeout": {
+        "tool": "modify_pending_order_payment",
+        "message": "Payment gateway timeout - please retry in a moment"
+    },
+    "inventory_sync_delay": {
+        "tool": "get_product_details",
+        "message": "Inventory system temporarily unavailable - retry shortly"
+    },
+    "database_lock": {
+        "tool": None,  # Any write tool
+        "message": "Database temporarily locked - please retry"
+    },
+    "product_out_of_stock": {
+        "tool": "modify_pending_order_items",
+        "message": "Product variant is currently out of stock"
+    },
+    "invalid_product_id": {
+        "tool": "get_product_details",
+        "message": "Product ID not found in catalog"
+    },
+    "insufficient_balance": {
+        "tool": "modify_pending_order_payment",
+        "message": "Insufficient gift card balance to complete transaction"
+    },
+    "order_already_processed": {
+        "tool": "cancel_pending_order",
+        "message": "Order has already been processed and cannot be modified"
+    },
+    "warehouse_unavailable": {
+        "tool": "exchange_delivered_order_items",
+        "message": "Warehouse for your region is temporarily closed"
+    },
+    "address_validation_failure": {
+        "tool": "modify_pending_order_address",
+        "message": "Address validation service unavailable - please retry"
+    },
+}
+
+# Telecom domain disruption mappings
+TELECOM_DISRUPTION_TOOL_MAPPING = {
+    "billing_system_timeout": {
+        "tool": "send_payment_request",
+        "message": "Billing system temporarily unavailable - please retry"
+    },
+    "network_api_delay": {
+        "tool": "suspend_line",
+        "message": "Network configuration API timeout - retry in a moment"
+    },
+    "customer_db_lock": {
+        "tool": "get_customer_by_phone",
+        "message": "Customer database temporarily locked - please retry"
+    },
+    "service_plan_unavailable": {
+        "tool": "get_details_by_id",
+        "message": "Service plan is no longer available for new customers"
+    },
+    "account_suspended": {
+        "tool": "refuel_data",
+        "message": "Account is suspended due to non-payment - clear outstanding balance first"
+    },
+    "line_not_found": {
+        "tool": "suspend_line",
+        "message": "Line not found for customer"
+    },
+    "line_already_suspended": {
+        "tool": "suspend_line",
+        "message": "Line is already suspended - cannot suspend again"
+    },
+    "line_not_suspended": {
+        "tool": "resume_line",
+        "message": "Line is not suspended - cannot resume"
+    },
+    "payment_already_pending": {
+        "tool": "send_payment_request",
+        "message": "A bill is already awaiting payment for this customer"
+    },
+    "data_refuel_limit_exceeded": {
+        "tool": "refuel_data",
+        "message": "Data refuel limit exceeded for this billing cycle"
+    },
+    "roaming_state_conflict": {
+        "tool": "enable_roaming",
+        "message": "Roaming was already enabled"
+    },
+}
+
+# Mock domain disruption mappings
+MOCK_DISRUPTION_TOOL_MAPPING = {
+    "database_lock": {
+        "tool": None,  # Any tool
+        "message": "Database temporarily locked - please retry"
+    },
+    "api_timeout": {
+        "tool": None,  # Any tool
+        "message": "API request timeout - please retry"
+    },
+    "connection_pool_exhausted": {
+        "tool": None,  # Any tool
+        "message": "Connection pool exhausted - retry shortly"
+    },
+    "task_not_found": {
+        "tool": "update_task_status",
+        "message": "Task not found in system"
+    },
+    "user_not_found": {
+        "tool": "create_task",
+        "message": "User not found"
+    },
+    "user_not_authorized": {
+        "tool": "create_task",
+        "message": "User not authorized to perform this action"
+    },
+    "invalid_status_transition": {
+        "tool": "update_task_status",
+        "message": "Cannot transition task to requested status"
+    },
+    "task_limit_exceeded": {
+        "tool": "create_task",
+        "message": "User has reached maximum task limit"
+    },
+    "duplicate_task_title": {
+        "tool": "create_task",
+        "message": "Task with this title already exists for this user"
+    },
+}
+
+# Central mapping of all domains
+DISRUPTION_MAPPINGS = {
+    "airline": AIRLINE_DISRUPTION_TOOL_MAPPING,
+    "retail": RETAIL_DISRUPTION_TOOL_MAPPING,
+    "telecom": TELECOM_DISRUPTION_TOOL_MAPPING,
+    "mock": MOCK_DISRUPTION_TOOL_MAPPING,
+}
+
 
 class DisruptionEngine:
     """
@@ -103,6 +239,7 @@ class DisruptionEngine:
             instance._enabled = True
             instance._executed_actions: List[Dict[str, Any]] = []
             instance._transient_attempt_counts: Dict[str, int] = {}
+            instance._current_domain: Optional[str] = None  # Track current domain
             sys._tau2_disruption_engine = instance
         return sys._tau2_disruption_engine
 
@@ -113,6 +250,7 @@ class DisruptionEngine:
         self._triggered_disruptions = []
         self._executed_actions = []
         self._transient_attempt_counts = {}
+        # Don't reset domain - it persists across tasks
         logger.debug("DisruptionEngine reset")
 
     def enable(self) -> None:
@@ -126,14 +264,38 @@ class DisruptionEngine:
     def is_enabled(self) -> bool:
         """Check if disruption injection is enabled."""
         return self._enabled
+    
+    def set_domain(self, domain: str) -> None:
+        """
+        Set the active domain for disruption scenarios.
+        
+        Args:
+            domain: Domain name (airline, retail, telecom, mock)
+        """
+        if domain not in DISRUPTION_MAPPINGS:
+            raise ValueError(
+                f"Unknown domain: {domain}. "
+                f"Supported domains: {list(DISRUPTION_MAPPINGS.keys())}"
+            )
+        self._current_domain = domain
+        logger.info(f"DisruptionEngine domain set to: {domain}")
 
-    def configure(self, disruption_scenarios: List[Dict[str, Any]]) -> None:
+    def configure(self, disruption_scenarios: List[Dict[str, Any]], domain: str = None) -> None:
         """
         Configure disruptions from a list of scenario definitions.
 
         Args:
             disruption_scenarios: List of disruption configurations.
+            domain: Optional domain name. If not provided, uses current domain.
         """
+        if domain:
+            self.set_domain(domain)
+        
+        if not self._current_domain:
+            # Default to airline for backward compatibility
+            self._current_domain = "airline"
+            logger.warning("No domain set, defaulting to 'airline'")
+        
         self._disruptions = []
         
         for scenario in disruption_scenarios:
@@ -142,7 +304,7 @@ class DisruptionEngine:
                 self._disruptions.append(config)
                 logger.info(
                     f"Configured disruption: {config.disruption_type} "
-                    f"-> {config.affected_tool}"
+                    f"-> {config.affected_tool} (domain: {self._current_domain})"
                 )
 
     def _map_scenario_to_config(
@@ -158,9 +320,12 @@ class DisruptionEngine:
         
         dtype_lower = str(dtype).lower()
         
-        # Look up in mapping
-        if dtype_lower in AIRLINE_DISRUPTION_TOOL_MAPPING:
-            mapping = AIRLINE_DISRUPTION_TOOL_MAPPING[dtype_lower]
+        # Get mapping for current domain
+        domain_mapping = DISRUPTION_MAPPINGS.get(self._current_domain, {})
+        
+        # Look up in domain-specific mapping
+        if dtype_lower in domain_mapping:
+            mapping = domain_mapping[dtype_lower]
             trigger_after = scenario.get("trigger_after", 2)
             persistent = scenario.get("persistent", False)
             transient_retries = scenario.get("retries_until_success", 2)
@@ -181,6 +346,9 @@ class DisruptionEngine:
                 transient_retries_until_success=transient_retries,
             )
         
+        logger.warning(
+            f"Unknown disruption type '{dtype_lower}' for domain '{self._current_domain}'"
+        )
         return None
 
     def check_disruption(
@@ -350,4 +518,129 @@ AIRLINE_DISRUPTION_SCENARIOS = {
         "retries_until_success": 1,
         "message": "Internal system error - temporary",
     },
+}
+
+# Predefined disruption scenarios for retail domain testing
+RETAIL_DISRUPTION_SCENARIOS = {
+    "payment_gateway_timeout": {
+        "type": "payment_gateway_timeout",
+        "trigger_after": 2,
+        "persistent": False,
+        "retries_until_success": 2,
+        "message": "Payment gateway timeout - please retry",
+    },
+    "inventory_sync_delay": {
+        "type": "inventory_sync_delay",
+        "trigger_after": 3,
+        "persistent": False,
+        "retries_until_success": 1,
+        "message": "Inventory system temporarily unavailable",
+    },
+    "product_out_of_stock": {
+        "type": "product_out_of_stock",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "modify_pending_order_items",
+        "message": "Product variant is currently out of stock",
+    },
+    "order_already_processed": {
+        "type": "order_already_processed",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "cancel_pending_order",
+        "message": "Order has already been processed",
+    },
+    "database_lock": {
+        "type": "database_lock",
+        "trigger_after": 2,
+        "persistent": False,
+        "retries_until_success": 1,
+        "message": "Database temporarily locked",
+    },
+}
+
+# Predefined disruption scenarios for telecom domain testing
+TELECOM_DISRUPTION_SCENARIOS = {
+    "billing_system_timeout": {
+        "type": "billing_system_timeout",
+        "trigger_after": 2,
+        "persistent": False,
+        "retries_until_success": 2,
+        "message": "Billing system temporarily unavailable",
+    },
+    "network_api_delay": {
+        "type": "network_api_delay",
+        "trigger_after": 3,
+        "persistent": False,
+        "retries_until_success": 1,
+        "message": "Network configuration API timeout",
+    },
+    "account_suspended": {
+        "type": "account_suspended",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "refuel_data",
+        "message": "Account is suspended due to non-payment",
+    },
+    "line_already_suspended": {
+        "type": "line_already_suspended",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "suspend_line",
+        "message": "Line is already suspended",
+    },
+    "payment_already_pending": {
+        "type": "payment_already_pending",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "send_payment_request",
+        "message": "A bill is already awaiting payment",
+    },
+}
+
+# Predefined disruption scenarios for mock domain testing
+MOCK_DISRUPTION_SCENARIOS = {
+    "database_lock": {
+        "type": "database_lock",
+        "trigger_after": 2,
+        "persistent": False,
+        "retries_until_success": 1,
+        "message": "Database temporarily locked",
+    },
+    "api_timeout": {
+        "type": "api_timeout",
+        "trigger_after": 3,
+        "persistent": False,
+        "retries_until_success": 2,
+        "message": "API request timeout",
+    },
+    "task_not_found": {
+        "type": "task_not_found",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "update_task_status",
+        "message": "Task not found in system",
+    },
+    "user_not_found": {
+        "type": "user_not_found",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "create_task",
+        "message": "User not found",
+    },
+    "user_not_authorized": {
+        "type": "user_not_authorized",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "create_task",
+        "message": "User not authorized to perform this action",
+    },
+}
+
+# Central registry of all domain scenarios
+DISRUPTION_SCENARIOS = {
+    "airline": AIRLINE_DISRUPTION_SCENARIOS,
+    "retail": RETAIL_DISRUPTION_SCENARIOS,
+    "telecom": TELECOM_DISRUPTION_SCENARIOS,
+    "mock": MOCK_DISRUPTION_SCENARIOS,
 }

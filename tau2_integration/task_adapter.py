@@ -66,19 +66,25 @@ class Tau2TaskDefinition:
 
 
 def load_tau2_tasks(
-    tasks_file: Path,
+    domain: str,
     task_ids: Optional[List[str]] = None
 ) -> List[Tau2TaskDefinition]:
     """
-    Load τ²-bench tasks from JSON file.
+    Load τ²-bench tasks from a specific domain.
 
     Args:
-        tasks_file: Path to tasks.json file.
+        domain: Domain name (airline, retail, telecom, mock).
         task_ids: Optional list of task IDs to load. If None, loads all.
 
     Returns:
         List of Tau2TaskDefinition objects.
     """
+    from .domain_registry import DomainRegistry
+    
+    # Get domain configuration
+    config = DomainRegistry.get_domain(domain)
+    tasks_file = config.tasks_path
+    
     with open(tasks_file, "r") as f:
         raw_tasks = json.load(f)
     
@@ -90,19 +96,20 @@ def load_tau2_tasks(
         if task_ids is not None and task_id not in task_ids:
             continue
         
-        task = convert_tau2_task(raw_task)
+        task = convert_tau2_task(raw_task, domain)
         tasks.append(task)
         
-    logger.info(f"Loaded {len(tasks)} tasks from {tasks_file}")
+    logger.info(f"Loaded {len(tasks)} tasks from {domain} domain ({tasks_file})")
     return tasks
 
 
-def convert_tau2_task(raw_task: Dict[str, Any]) -> Tau2TaskDefinition:
+def convert_tau2_task(raw_task: Dict[str, Any], domain: str = "airline") -> Tau2TaskDefinition:
     """
     Convert a raw τ²-bench task to Tau2TaskDefinition.
 
     Args:
         raw_task: Raw task dictionary from tasks.json.
+        domain: Domain name for context.
 
     Returns:
         Tau2TaskDefinition object.
@@ -113,10 +120,10 @@ def convert_tau2_task(raw_task: Dict[str, Any]) -> Tau2TaskDefinition:
     evaluation = raw_task.get("evaluation_criteria", {})
     
     # Determine category from task content
-    category = _infer_category(raw_task)
+    category = _infer_category(raw_task, domain)
     
     # Extract goals from NL assertions
-    nl_assertions = evaluation.get("nl_assertions", [])
+    nl_assertions = evaluation.get("nl_assertions", []) or []
     goals = [
         TaskGoal(
             goal_id=f"goal_{i}",
@@ -127,10 +134,10 @@ def convert_tau2_task(raw_task: Dict[str, Any]) -> Tau2TaskDefinition:
     ]
     
     # Extract expected actions
-    expected_actions = evaluation.get("actions", [])
+    expected_actions = evaluation.get("actions", []) or []
     
     # Extract constraints from policy references
-    constraints = _extract_constraints(raw_task)
+    constraints = _extract_constraints(raw_task, domain)
     
     # Build name from purpose or reason for call
     purpose = description_info.get("purpose", "")
@@ -152,7 +159,7 @@ def convert_tau2_task(raw_task: Dict[str, Any]) -> Tau2TaskDefinition:
     )
 
 
-def _infer_category(raw_task: Dict[str, Any]) -> TaskCategory:
+def _infer_category(raw_task: Dict[str, Any], domain: str = "airline") -> TaskCategory:
     """Infer task category from content."""
     user_scenario = raw_task.get("user_scenario", {})
     instructions = user_scenario.get("instructions", {})
@@ -175,7 +182,7 @@ def _infer_category(raw_task: Dict[str, Any]) -> TaskCategory:
         return TaskCategory.INQUIRY
 
 
-def _extract_constraints(raw_task: Dict[str, Any]) -> List[TaskConstraint]:
+def _extract_constraints(raw_task: Dict[str, Any], domain: str = "airline") -> List[TaskConstraint]:
     """Extract constraints from task definition."""
     constraints = []
     

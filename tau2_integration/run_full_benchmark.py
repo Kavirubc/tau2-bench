@@ -39,6 +39,7 @@ from tau2_integration.runners.langgraph_runner import LangGraphRunner
 from tau2_integration.runners.rac_runner import RACRunner
 from tau2_integration.runners.saga_runner import SagaLLMRunner
 from tau2_integration.evaluation import evaluate_run, compare_frameworks, print_comparison_table, EvaluationMetrics
+from tau2_integration.domain_registry import DomainRegistry
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,48 +48,35 @@ logging.basicConfig(
 logger = logging.getLogger("run_full_benchmark")
 
 # Default paths
-DEFAULT_DATA_DIR = Path(__file__).parent.parent / "data" / "tau2" / "domains" / "airline"
 DEFAULT_OUTPUT_DIR = Path(__file__).parent / "results"
 DEFAULT_TRACE_DIR = Path(__file__).parent / "results" / "traces"
 
-# Default model
+# Default model and domain
 DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_DOMAIN = "airline"
 
 
-def load_airline_tools():
-    """Load τ²-bench airline tools without disruption wrapping."""
+def load_domain_tools(domain: str):
+    """Load τ²-bench tools for a specific domain."""
     try:
-        from tau2.domains.airline.tools import AirlineTools
-        from tau2.domains.airline.data_model import FlightDB
-        from tau2.domains.airline.utils import AIRLINE_DB_PATH
-        
-        db = FlightDB.load(AIRLINE_DB_PATH)
-        toolkit = AirlineTools(db)
-        
-        # Get all tool functions
-        tools = {}
-        for name in dir(toolkit):
-            if name.startswith("_"):
-                continue
-            attr = getattr(toolkit, name)
-            if callable(attr) and hasattr(attr, "__self__"):
-                tools[name] = attr
-        
-        logger.info(f"Loaded {len(tools)} airline tools")
-        return tools, toolkit
-        
-    except ImportError as e:
-        logger.error(f"Failed to import τ²-bench: {e}")
+        tools = DomainRegistry.load_domain_tools(domain)
+        logger.info(f"Loaded {len(tools)} tools for {domain} domain")
+        return tools
+    except Exception as e:
+        logger.error(f"Failed to load {domain} domain tools: {e}")
         logger.info("Make sure τ²-bench is installed: pip install -e .")
-        return {}, None
+        return {}
 
 
-def load_airline_policy() -> str:
-    """Load the airline policy document."""
-    policy_path = DEFAULT_DATA_DIR / "policy.md"
-    if policy_path.exists():
-        return policy_path.read_text()
-    return "No policy found."
+def load_domain_policy(domain: str) -> str:
+    """Load the policy document for a specific domain."""
+    try:
+        policy = DomainRegistry.load_domain_policy(domain)
+        logger.info(f"Loaded policy for {domain} domain ({len(policy)} chars)")
+        return policy
+    except Exception as e:
+        logger.error(f"Failed to load {domain} domain policy: {e}")
+        return f"No policy found for {domain} domain."
 
 
 def run_single_benchmark(
@@ -171,6 +159,7 @@ def run_single_benchmark(
 
 
 def run_full_benchmark(
+    domain: str,
     task_ids: List[str],
     frameworks: List[str],
     trials: int = 1,
@@ -178,9 +167,10 @@ def run_full_benchmark(
     output_dir: Path = None,
 ) -> Dict[str, Any]:
     """
-    Run comprehensive benchmark across all frameworks.
+    Run comprehensive benchmark across all frameworks for a specific domain.
     
     Args:
+        domain: Domain name (airline, retail, telecom, mock)
         task_ids: List of task IDs to run
         frameworks: List of frameworks to test
         trials: Number of trials per task
@@ -193,26 +183,24 @@ def run_full_benchmark(
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    trace_dir = DEFAULT_TRACE_DIR
+    trace_dir = DEFAULT_TRACE_DIR / domain
     trace_dir.mkdir(parents=True, exist_ok=True)
     
-    # Load tasks
-    tasks_file = DEFAULT_DATA_DIR / "tasks.json"
-    tasks = load_tau2_tasks(tasks_file, task_ids)
+    # Load tasks for the specified domain
+    tasks = load_tau2_tasks(domain, task_ids)
     
     if not tasks:
-        logger.error(f"No tasks found for IDs: {task_ids}")
+        logger.error(f"No tasks found for domain '{domain}' with IDs: {task_ids}")
         return {"error": "No tasks found"}
     
-    logger.info(f"Loaded {len(tasks)} tasks: {[t.task_id for t in tasks]}")
+    logger.info(f"Loaded {len(tasks)} tasks from {domain} domain: {[t.task_id for t in tasks]}")
     
-    # Load tools and policy
-    tools, toolkit = load_airline_tools()
+    # Load tools and policy for the domain
+    tools = load_domain_tools(domain)
     if not tools:
-        return {"error": "Failed to load airline tools"}
+        return {"error": f"Failed to load {domain} domain tools"}
     
-    policy = load_airline_policy()
-    logger.info(f"Loaded policy ({len(policy)} chars)")
+    policy = load_domain_policy(domain)
     
     # Initialize runners
     runners = {}
@@ -229,6 +217,7 @@ def run_full_benchmark(
     results = {
         "timestamp": datetime.now().isoformat(),
         "config": {
+            "domain": domain,
             "task_ids": task_ids,
             "frameworks": frameworks,
             "trials": trials,
@@ -241,6 +230,7 @@ def run_full_benchmark(
     print("\n" + "=" * 80)
     print("🚀 RUNNING COMPREHENSIVE BENCHMARK")
     print("=" * 80)
+    print(f"Domain: {domain}")
     print(f"Tasks: {task_ids}")
     print(f"Frameworks: {frameworks}")
     print(f"Trials per task: {trials}")
@@ -281,7 +271,7 @@ def run_full_benchmark(
     
     # Save results
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = output_dir / f"benchmark_full_{timestamp}.json"
+    output_file = output_dir / f"benchmark_{domain}_{timestamp}.json"
     
     with open(output_file, "w") as f:
         json.dump(results, f, indent=2)
@@ -364,6 +354,12 @@ def main():
         description="Run comprehensive benchmark with enhanced tracing"
     )
     parser.add_argument(
+        "--domain", "-d",
+        type=str,
+        help="Domain to benchmark (airline, retail, telecom, mock)",
+        default=DEFAULT_DOMAIN,
+    )
+    parser.add_argument(
         "--tasks", "-t",
         type=str,
         help="Task IDs to run (comma-separated)",
@@ -396,11 +392,19 @@ def main():
     
     args = parser.parse_args()
     
+    # Validate domain
+    valid_domains = DomainRegistry.list_domains()
+    if args.domain not in valid_domains:
+        logger.error(f"Invalid domain: {args.domain}")
+        logger.error(f"Valid domains: {valid_domains}")
+        return
+    
     task_ids = [t.strip() for t in args.tasks.split(",")]
     frameworks = [f.strip() for f in args.frameworks.split(",")]
     output_dir = Path(args.output) if args.output else None
     
     run_full_benchmark(
+        domain=args.domain,
         task_ids=task_ids,
         frameworks=frameworks,
         trials=args.trials,
