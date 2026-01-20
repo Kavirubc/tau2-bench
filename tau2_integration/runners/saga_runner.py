@@ -68,7 +68,13 @@ class SagaLLMRunner(BaseFrameworkRunner):
         policy: str,
     ) -> RunnerResult:
         """
-        Run a task using SagaLLM 3-phase execution.
+        Run a task using SagaLLM with full code generation (Paper-Compliant).
+
+        Phases:
+        1. Planning - Generate action plan
+        2. Code Generation - Generate Python code for each step (NEW!)
+        3. Execution - Execute generated code
+        4. Compensation - Execute generated compensation code if needed
 
         Args:
             task: Task definition.
@@ -97,14 +103,12 @@ class SagaLLMRunner(BaseFrameworkRunner):
         # Initialize TraceRecorder
         from ..tracing import TraceRecorder
         from ..callbacks import TracingCallbackHandler
+        from ..saga_codegen import SagaCodeGenerator
         
         recorder = TraceRecorder(task_id=task.task_id, framework="sagallm")
         tracing_handler = TracingCallbackHandler(recorder)
 
         try:
-            # Phase 1: Planning
-            logger.info("Phase 1: Planning")
-            
             # Setup Langsmith tracing
             callbacks = [tracing_handler]
             try:
@@ -121,14 +125,15 @@ class SagaLLMRunner(BaseFrameworkRunner):
             # Configure run metadata for Langsmith
             run_config = {
                 "run_name": f"SagaLLM-Task-{task.task_id}",
-                "tags": ["tau2-bench", "SagaLLM", "framework:SagaLLM", f"task-{task.task_id}"],
+                "tags": ["tau2-bench", "SagaLLM", "framework:SagaLLM", f"task-{task.task_id}", "code-generation"],
                 "metadata": {
                     "task_id": task.task_id,
                     "task_name": task.name,
                     "framework": "SagaLLM",
-                    "framework_name": "SagaLLM 3-Phase (Plan-Execute-Compensate)",
+                    "framework_name": "SagaLLM (Paper-Compliant with Code Generation)",
                     "model": self.model,
                     "enable_replanning": self.enable_replanning,
+                    "code_generation": True,
                 },
                 "callbacks": callbacks,
             }
@@ -152,7 +157,9 @@ class SagaLLMRunner(BaseFrameworkRunner):
                 self._executed_actions = [] # Reset for this iteration
                 
                 try:
-                    # Phase 1: Planning (with context from previous failures)
+                    # ============================================================
+                    # PHASE 1: PLANNING (with context from previous failures)
+                    # ============================================================
                     logger.info("Phase 1: Planning")
                     
                     # Update run name for iteration
@@ -164,40 +171,124 @@ class SagaLLMRunner(BaseFrameworkRunner):
                         logger.warning("Planning failed, stopping.")
                         break
                     
-                    # Phase 2: Execution
-                    logger.info("Phase 2: Execution")
-                    execution_result = self._execute_plan(llm, plan, tools, policy, recorder)
+                    # ============================================================
+                    # PHASE 2: CODE GENERATION (NEW - Paper Compliant!)
+                    # ============================================================
+                    logger.info("Phase 2: Code Generation (DefineLogSchema, DefineNodeAgent, DefineCompAgent)")
                     
-                    # Capture messages for context
-                    iter_messages = execution_result.get("messages", [])
+                    # Initialize code generator
+                    code_generator = SagaCodeGenerator(model=self.model)
+                    
+                    # Generate code for all steps in the plan
+                    step_id = recorder.start_step("code_generation", "saga_phase2", {"plan_steps": len(plan)})
+                    
+                    try:
+                        generated_workflow = code_generator.generate_workflow(
+                            plan=plan,
+                            tools=tools,
+                            compensation_mapping=AIRLINE_COMPENSATION_MAPPING
+                        )
+                        
+                        recorder.end_step(step_id, output={
+                            "schemas_generated": len(generated_workflow.schemas),
+                            "agents_generated": len(generated_workflow.agents),
+                            "compensations_generated": len(generated_workflow.compensations),
+                            "llm_calls": generated_workflow.llm_calls,
+                            "total_tokens": generated_workflow.total_tokens
+                        })
+                        
+                        logger.info(f"Code generation complete: {generated_workflow.llm_calls} LLM calls, {generated_workflow.total_tokens} tokens")
+                        
+                    except Exception as e:
+                        logger.error(f"Code generation failed: {e}")
+                        recorder.end_step(step_id, output=None, error=str(e))
+                        raise
+                    
+                    # ============================================================
+                    # PHASE 3: EXECUTION (Execute generated code)
+                    # ============================================================
+                    logger.info("Phase 3: Execution (Running generated code)")
+                    
+                    execution_step_id = recorder.start_step("execution", "saga_phase3", {"tasks": len(plan)})
+                    
+                    try:
+                        execution_result = code_generator.execute_generated_code(
+                            workflow=generated_workflow,
+                            tools=tools
+                        )
+                        
+                        recorder.end_step(execution_step_id, output={
+                            "success": execution_result['success'],
+                            "executed_tasks": len(execution_result.get('executed_actions', []))
+                        })
+                        
+                    except Exception as e:
+                        logger.error(f"Execution failed: {e}")
+                        recorder.end_step(execution_step_id, output=None, error=str(e))
+                        execution_result = {
+                            'success': False,
+                            'error': str(e),
+                            'executed_actions': [],
+                            'namespace': {}
+                        }
                     
                     # Collect actions from this attempt
-                    all_executed_actions.extend(self._executed_actions)
+                    all_executed_actions.extend(execution_result.get('executed_actions', []))
                     
-                    if execution_result["success"]:
-                        logger.info("Plan executed successfully!")
+                    if execution_result['success']:
+                        logger.info("Execution successful!")
                         recorder.finish(status="success")
+                        
+                        # Convert executed_actions to tool_calls format
+                        tool_calls = []
+                        for action in all_executed_actions:
+                            tool_calls.append({
+                                "step": action.get('task_id'),
+                                "tool": action.get('agent'),
+                                "status": action.get('status'),
+                            })
+                        
                         return RunnerResult(
                             task_id=task.task_id,
                             framework=self.framework_name,
                             success=True,
                             execution_time=0,
-                            tool_calls=all_executed_actions,
-                            messages=execution_result.get("messages", []),
+                            tool_calls=tool_calls,
+                            messages=[],
                             raw_output=execution_result,
                             trace=recorder.trace.to_dict(),
                         )
                     
-                    # Phase 3: Compensation (if execution failed)
-                    logger.info(f"Execution failed: {execution_result.get('error')}. Phase 3: Compensation")
+                    # ============================================================
+                    # PHASE 4: COMPENSATION (if execution failed)
+                    # ============================================================
+                    logger.info(f"Execution failed: {execution_result.get('error')}. Phase 4: Compensation")
                     
-                    compensation_result = self._compensate(tools, recorder)
-                    comp_actions_this_iter = compensation_result.get("actions", [])
-                    all_compensation_actions.extend(comp_actions_this_iter)
+                    comp_step_id = recorder.start_step("compensation", "saga_phase4", {
+                        "failed_task": execution_result.get('failed_task'),
+                        "actions_to_compensate": len(execution_result.get('executed_actions', []))
+                    })
                     
-                    if not compensation_result["success"]:
-                        logger.error("Critical: Compensation failed. Cannot safely replan.")
-                        recorder.finish(status="failed", metadata={"error": f"Compensation failed: {execution_result.get('error')}"})
+                    try:
+                        compensation_result = code_generator.execute_compensation(
+                            workflow=generated_workflow,
+                            executed_actions=execution_result.get('executed_actions', []),
+                            namespace=execution_result.get('namespace', {}),
+                            tools=tools
+                        )
+                        
+                        recorder.end_step(comp_step_id, output={
+                            "compensations_executed": len(compensation_result.get('compensation_results', []))
+                        })
+                        
+                        comp_actions_this_iter = compensation_result.get('compensation_results', [])
+                        all_compensation_actions.extend(comp_actions_this_iter)
+                        
+                    except Exception as e:
+                        logger.error(f"Compensation failed: {e}")
+                        recorder.end_step(comp_step_id, output=None, error=str(e))
+                        recorder.finish(status="failed", metadata={"error": f"Compensation failed: {e}"})
+                        
                         return RunnerResult(
                             task_id=task.task_id,
                             framework=self.framework_name,
@@ -205,29 +296,19 @@ class SagaLLMRunner(BaseFrameworkRunner):
                             execution_time=0,
                             tool_calls=all_executed_actions,
                             compensation_actions=all_compensation_actions,
-                            error=f"Compensation failed: {execution_result.get('error')}",
+                            error=f"Compensation failed: {e}",
                             trace=recorder.trace.to_dict(),
                         )
 
                     if self.enable_replanning:
                         logger.info("Compensation successful. Preparing to replan.")
                         failure_reason = execution_result.get("error", "Unknown error")
-                        failed_step = execution_result.get("failed_step", "?")
+                        failed_step = execution_result.get("failed_task", "?")
                         
                         # Add to context
                         context_msg = f"Attempt {iteration} failed at step {failed_step}: {failure_reason}. " \
                                       f"The system has been rolled back. You must try a DIFFERENT approach."
                         failure_context.append(context_msg)
-                        
-                        # Also add the tool outputs from this attempt so the planner can see search results
-                        # Filter for 'tool' messages
-                        tool_outputs = [
-                            f"Tool '{m['tool']}' output: {m['content']}" 
-                            for m in iter_messages 
-                            if m.get("role") == "tool"
-                        ]
-                        if tool_outputs:
-                            failure_context.append("Information gathered in this attempt:\n" + "\n".join(tool_outputs))
                     else:
                         logger.info("Replanning disabled. Stopping.")
                         break
@@ -236,7 +317,13 @@ class SagaLLMRunner(BaseFrameworkRunner):
                     logger.error(f"Iteration {iteration} failed: {e}")
                     # Try last-ditch compensation
                     try:
-                        self._compensate(tools, recorder)
+                        if 'generated_workflow' in locals() and 'execution_result' in locals():
+                            code_generator.execute_compensation(
+                                workflow=generated_workflow,
+                                executed_actions=execution_result.get('executed_actions', []),
+                                namespace=execution_result.get('namespace', {}),
+                                tools=tools
+                            )
                     except:
                         pass
                     
