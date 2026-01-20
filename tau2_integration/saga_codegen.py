@@ -113,6 +113,79 @@ class SagaCodeGenerator:
         # Return as-is if no markdown
         return response.strip()
     
+    def _validate_generated_code(self, code: str, expected_function: str, tools: Dict[str, Any]) -> tuple[bool, str]:
+        """Validate generated code for common errors."""
+        issues = []
+        
+        # Check 1: Function definition exists
+        if f"def {expected_function}" not in code:
+            issues.append(f"Missing function definition: {expected_function}")
+        
+        # Check 2: Returns state
+        if "return state" not in code:
+            issues.append("Missing 'return state' statement")
+        
+        # Check 3: Tool names are valid
+        for tool_name in tools.keys():
+            if f"tools['{tool_name}']" in code or f'tools["{tool_name}"]' in code:
+                continue  # Valid tool reference found
+        
+        # Check if any invalid tool names are used
+        import re
+        tool_pattern = r"tools\['([^']+)'\]|tools\[\"([^\"]+)\"\]"
+        found_tools = re.findall(tool_pattern, code)
+        for match in found_tools:
+            tool_name = match[0] or match[1]
+            if tool_name not in tools:
+                issues.append(f"Invalid tool name: '{tool_name}' (available: {list(tools.keys())})")
+        
+        # Check 4: Basic syntax
+        try:
+            compile(code, '<string>', 'exec')
+        except SyntaxError as e:
+            issues.append(f"Syntax error: {e}")
+        
+        if issues:
+            return False, "; ".join(issues)
+        return True, "Validation passed"
+    
+    def _get_tool_signature_details(self, tools: Dict[str, Any]) -> str:
+        """Get detailed tool signatures with examples."""
+        tool_details = []
+        
+        for name, tool in tools.items():
+            # Get description
+            doc = getattr(tool, '__doc__', '') or ''
+            desc = doc.split('\n')[0].strip() if doc else f"Tool: {name}"
+            
+            # Try to get args schema
+            try:
+                if hasattr(tool, 'args'):
+                    args_schema = tool.args
+                    if isinstance(args_schema, dict):
+                        params = []
+                        for arg_name, arg_spec in args_schema.items():
+                            arg_type = arg_spec.get('type', 'Any')
+                            params.append(f"{arg_name}: {arg_type}")
+                        
+                        params_str = ", ".join(params)
+                        example_args = ", ".join([f"'{k}': value" for k in args_schema.keys()])
+                        
+                        tool_details.append(
+                            f"  • {name}({params_str})\n"
+                            f"    Description: {desc}\n"
+                            f"    Usage: tools['{name}'].invoke({{{example_args}}})"
+                        )
+                    else:
+                        tool_details.append(f"  • {name}(...)\n    Description: {desc}")
+                else:
+                    tool_details.append(f"  • {name}(...)\n    Description: {desc}")
+            except Exception as e:
+                logger.debug(f"Could not extract args for {name}: {e}")
+                tool_details.append(f"  • {name}(...)\n    Description: {desc}")
+        
+        return "\n\n".join(tool_details)
+    
     def define_log_schema(
         self,
         task_id: str,
@@ -210,17 +283,22 @@ Generate ONLY the Python code, no explanations."""
         """
         logger.info(f"[Phase 2] DefineNodeAgent for {task_id}")
         
-        # Format tool descriptions
-        tool_descriptions = []
-        for name, tool in tools.items():
-            doc = getattr(tool, '__doc__', '') or ''
-            # Extract first line of docstring
-            first_line = doc.split('\n')[0].strip() if doc else f"Tool: {name}"
-            tool_descriptions.append(f"- {name}: {first_line[:100]}")
+        # Get detailed tool signatures
+        tools_detailed = self._get_tool_signature_details(tools)
         
-        tools_str = '\n'.join(tool_descriptions)
         precond_str = ', '.join(preconditions) if preconditions else "None"
         postcond_str = ', '.join(postconditions) if postconditions else "None"
+        
+        # Extract potential parameters from task description
+        param_hints = f"\\nParameter extraction hints for '{task_description}':\\n"
+        if 'customer' in task_description.lower() or 'user' in task_description.lower():
+            param_hints += "- Look for customer/user IDs (e.g., 'C123', 'user_456')\\n"
+        if 'from' in task_description.lower() and 'to' in task_description.lower():
+            param_hints += "- Look for origin and destination (e.g., 'from NYC to LAX')\\n"
+        if 'flight' in task_description.lower():
+            param_hints += "- Look for flight numbers, dates, or booking references\\n"
+        if 'reservation' in task_description.lower() or 'booking' in task_description.lower():
+            param_hints += "- Look for reservation/booking IDs\\n"
         
         prompt = f"""Generate a Python function that executes this task:
 
@@ -229,40 +307,43 @@ Task Name: {task_name}
 Description: {task_description}
 Preconditions: {precond_str}
 Postconditions: {postcond_str}
-
+{param_hints}
 State Schema:
 {schema.schema_code}
 
-Available Tools:
-{tools_str}
+Available Tools (with exact signatures):
+{tools_detailed}
 
 Generate a function with this signature:
 ```python
 def {task_id.replace('-', '_')}_agent(state: {schema.schema_name}, tools: Dict[str, Any]) -> {schema.schema_name}:
 ```
 
-The function should:
-1. Validate preconditions (check state.status)
-2. Update state.status to "running"
-3. Set state.started_at timestamp
-4. Call the appropriate tool(s) from the tools dictionary
-5. Store result in state.result
-6. Update state.status to "completed" or "failed"
-7. Set state.completed_at timestamp
-8. Return the updated state
+CRITICAL REQUIREMENTS:
+1. Use EXACT tool names from the list above
+2. Use EXACT parameter names from the tool signatures
+3. Extract values from the task description or state fields
+4. Handle tool responses (they return strings or dicts)
+5. Store results in state.result as a dictionary
+6. Set state.status to "completed" on success, "failed" on error
+7. Use try/except for error handling (NO finally blocks)
+8. Always return the state object
 
-Important:
-- Tools are called like: tools['tool_name'].invoke({{'arg': value}})
-- Handle exceptions with try/except (DO NOT use finally blocks)
-- Set state.error on failure
-- Use datetime.now().isoformat() for timestamps
-- Always return the state object at the end
-- DO NOT use 'return' inside 'finally' blocks
-- Keep error handling simple with try/except only
+Step-by-step approach:
+1. Validate state.status == "pending"
+2. Set state.status = "running" and state.started_at
+3. Parse task description to extract required parameters
+4. Call the appropriate tool with correct parameter names
+5. Check if result contains errors
+6. Store result in state.result
+7. Set state.status = "completed" and state.completed_at
+8. Return state
 
-Example structure:
+Example (for a booking task):
 ```python
-def task_agent(state: TaskState, tools: Dict[str, Any]) -> TaskState:
+def book_flight_agent(state: BookFlightState, tools: Dict[str, Any]) -> BookFlightState:
+    from datetime import datetime
+    
     # Validate
     if state.status != "pending":
         state.error = "Task already executed"
@@ -274,11 +355,24 @@ def task_agent(state: TaskState, tools: Dict[str, Any]) -> TaskState:
     state.started_at = datetime.now().isoformat()
     
     try:
-        # Call tool
-        result = tools['some_tool'].invoke({{'param': 'value'}})
-        state.result = {{'output': str(result)}}
+        # Extract parameters from description or state
+        # Example: "Book flight for customer C123 from NYC to LAX"
+        customer_id = "C123"  # Extract from description
+        origin = "NYC"
+        destination = "LAX"
+        
+        # Call tool with EXACT parameter names
+        result = tools['book_flight'].invoke({{
+            'customer_id': customer_id,
+            'origin': origin,
+            'destination': destination
+        }})
+        
+        # Store result
+        state.result = {{'output': str(result), 'booking_id': 'extracted_id'}}
         state.status = "completed"
         state.completed_at = datetime.now().isoformat()
+        
     except Exception as e:
         state.error = str(e)
         state.status = "failed"
@@ -287,24 +381,55 @@ def task_agent(state: TaskState, tools: Dict[str, Any]) -> TaskState:
     return state
 ```
 
+IMPORTANT:
+- Match tool parameter names EXACTLY (e.g., if tool uses 'customer_id', don't use 'user_id')
+- Extract parameter values from the task description
+- Don't invent tool names - use only tools from the list above
+- Check result for error indicators before marking as completed
+- NO finally blocks, NO return inside finally
+
 Generate ONLY the Python function code, no explanations."""
 
+        # First attempt
         response = self._call_llm(prompt)
         code = self._extract_code(response)
         
-        # Validate syntax
-        try:
-            compile(code, '<string>', 'exec')
-        except SyntaxError as e:
-            logger.warning(f"Generated agent has syntax error: {e}")
+        # Validate generated code
+        agent_name = f"{task_id.replace('-', '_')}_agent"
+        is_valid, validation_msg = self._validate_generated_code(code, agent_name, tools)
+        
+        # If validation fails, try to fix it
+        if not is_valid:
+            logger.warning(f"Generated code validation failed: {validation_msg}")
+            logger.info("Attempting to regenerate with error feedback...")
+            
+            # Add error feedback to prompt
+            fix_prompt = f"""The previous code generation had issues:
+{validation_msg}
+
+Please regenerate the code fixing these issues. Remember:
+- Use EXACT tool names from the available tools list
+- Include 'return state' at the end
+- Ensure proper syntax
+
+Original prompt:
+{prompt}
+
+Generate corrected code:"""
+            
+            response = self._call_llm(fix_prompt)
+            code = self._extract_code(response)
+            
+            # Validate again
+            is_valid, validation_msg = self._validate_generated_code(code, agent_name, tools)
+            if not is_valid:
+                logger.error(f"Code still invalid after retry: {validation_msg}")
         
         # Extract required tools
         required_tools = []
         for tool_name in tools.keys():
             if tool_name in code:
                 required_tools.append(tool_name)
-        
-        agent_name = f"{task_id.replace('-', '_')}_agent"
         
         return GeneratedAgent(
             task_id=task_id,
