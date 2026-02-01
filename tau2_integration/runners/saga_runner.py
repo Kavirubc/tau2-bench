@@ -68,13 +68,15 @@ class SagaLLMRunner(BaseFrameworkRunner):
         policy: str,
     ) -> RunnerResult:
         """
-        Run a task using SagaLLM with full code generation (Paper-Compliant).
+        Run a task using SagaLLM with workflow generation (CORRECTED - Paper-Compliant).
 
         Phases:
         1. Planning - Generate action plan
-        2. Code Generation - Generate Python code for each step (NEW!)
-        3. Execution - Execute generated code
-        4. Compensation - Execute generated compensation code if needed
+        2. Workflow Generation - Build LangGraph workflow with LLM tool calling
+        3. Execution - LLM decides which tools to call at runtime
+        4. Compensation - Roll back on failure
+
+        This matches REALM-Bench's actual implementation.
 
         Args:
             task: Task definition.
@@ -98,12 +100,11 @@ class SagaLLMRunner(BaseFrameworkRunner):
             )
         
         self._executed_actions = []
-        compensation_actions = []
         
         # Initialize TraceRecorder
         from ..tracing import TraceRecorder
         from ..callbacks import TracingCallbackHandler
-        from ..saga_codegen import SagaCodeGenerator
+        from ..saga_workflow_builder import SagaWorkflowBuilder, SagaState
         
         recorder = TraceRecorder(task_id=task.task_id, framework="sagallm")
         tracing_handler = TracingCallbackHandler(recorder)
@@ -125,15 +126,15 @@ class SagaLLMRunner(BaseFrameworkRunner):
             # Configure run metadata for Langsmith
             run_config = {
                 "run_name": f"SagaLLM-Task-{task.task_id}",
-                "tags": ["tau2-bench", "SagaLLM", "framework:SagaLLM", f"task-{task.task_id}", "code-generation"],
+                "tags": ["tau2-bench", "SagaLLM", "framework:SagaLLM", f"task-{task.task_id}", "workflow-generation"],
                 "metadata": {
                     "task_id": task.task_id,
                     "task_name": task.name,
                     "framework": "SagaLLM",
-                    "framework_name": "SagaLLM (Paper-Compliant with Code Generation)",
+                    "framework_name": "SagaLLM (Paper-Compliant with Workflow Generation)",
                     "model": self.model,
                     "enable_replanning": self.enable_replanning,
-                    "code_generation": True,
+                    "workflow_generation": True,
                 },
                 "callbacks": callbacks,
             }
@@ -147,208 +148,170 @@ class SagaLLMRunner(BaseFrameworkRunner):
 
             iteration = 0
             failure_context = []
-            all_executed_actions = []
+            all_tool_calls = []
             all_compensation_actions = []
+            
+            # Initialize Persistent Context
+            from ..persistent_context import PersistentExecutionContext
+            persistent_ctx = PersistentExecutionContext()
             
             while iteration < self.max_iterations:
                 iteration += 1
                 logger.info(f"=== SagaLLM Iteration {iteration}/{self.max_iterations} ===")
                 
-                self._executed_actions = [] # Reset for this iteration
-                
                 try:
                     # ============================================================
-                    # PHASE 1: PLANNING (with context from previous failures)
+                    # PHASE 1: PLANNING (or REPLANNING)
                     # ============================================================
-                    logger.info("Phase 1: Planning")
+                    logger.info("Phase 1: Planning / Replanning")
                     
                     # Update run name for iteration
                     run_config["run_name"] = f"SagaLLM-Task-{task.task_id}-Iter{iteration}"
                     
-                    plan = self._generate_plan(llm, task, tools, policy, run_config, failure_context)
+                    plan = None
+                    if iteration == 1:
+                        # First attempt: Fresh plan
+                        persistent_ctx.original_plan = self._generate_plan(llm, task, tools, policy, run_config)
+                        plan = persistent_ctx.original_plan
+                    else:
+                        # Subsequent attempts: Strategic Replan
+                        plan = self._generate_replan_with_context(llm, task, persistent_ctx, run_config)
                     
                     if not plan:
                         logger.warning("Planning failed, stopping.")
                         break
                     
+                    # Store plan in context if it's the first one
+                    if not persistent_ctx.original_plan:
+                        persistent_ctx.original_plan = plan
+
                     # ============================================================
-                    # PHASE 2: CODE GENERATION (NEW - Paper Compliant!)
+                    # PHASE 2: WORKFLOW GENERATION
                     # ============================================================
-                    logger.info("Phase 2: Code Generation (DefineLogSchema, DefineNodeAgent, DefineCompAgent)")
+                    logger.info("Phase 2: Workflow Generation")
                     
-                    # Initialize code generator
-                    code_generator = SagaCodeGenerator(model=self.model)
-                    
-                    # Generate code for all steps in the plan
-                    step_id = recorder.start_step("code_generation", "saga_phase2", {"plan_steps": len(plan)})
+                    workflow_step_id = recorder.start_step("workflow_generation", "saga_phase2", {"plan_steps": len(plan)})
                     
                     try:
-                        generated_workflow = code_generator.generate_workflow(
-                            plan=plan,
-                            tools=tools,
-                            compensation_mapping=AIRLINE_COMPENSATION_MAPPING
-                        )
-                        
-                        recorder.end_step(step_id, output={
-                            "schemas_generated": len(generated_workflow.schemas),
-                            "agents_generated": len(generated_workflow.agents),
-                            "compensations_generated": len(generated_workflow.compensations),
-                            "llm_calls": generated_workflow.llm_calls,
-                            "total_tokens": generated_workflow.total_tokens
-                        })
-                        
-                        logger.info(f"Code generation complete: {generated_workflow.llm_calls} LLM calls, {generated_workflow.total_tokens} tokens")
-                        
+                        builder = SagaWorkflowBuilder(model=self.model)
+                        workflow = builder.build_workflow(plan, tools, llm)
+                        recorder.end_step(workflow_step_id, output={"nodes": len(plan) + 2})
                     except Exception as e:
-                        logger.error(f"Code generation failed: {e}")
-                        recorder.end_step(step_id, output=None, error=str(e))
+                        logger.error(f"Workflow generation failed: {e}")
+                        recorder.end_step(workflow_step_id, output=None, error=str(e))
                         raise
                     
                     # ============================================================
-                    # PHASE 3: EXECUTION (Execute generated code)
+                    # PHASE 3: EXECUTION
                     # ============================================================
-                    logger.info("Phase 3: Execution (Running generated code)")
+                    logger.info("Phase 3: Execution")
                     
                     execution_step_id = recorder.start_step("execution", "saga_phase3", {"tasks": len(plan)})
                     
                     try:
-                        execution_result = code_generator.execute_generated_code(
-                            workflow=generated_workflow,
-                            tools=tools
-                        )
-                        
-                        recorder.end_step(execution_step_id, output={
-                            "success": execution_result['success'],
-                            "executed_tasks": len(execution_result.get('executed_actions', []))
-                        })
-                        
-                    except Exception as e:
-                        logger.error(f"Execution failed: {e}")
-                        recorder.end_step(execution_step_id, output=None, error=str(e))
-                        execution_result = {
-                            'success': False,
-                            'error': str(e),
-                            'executed_actions': [],
-                            'namespace': {}
+                        # Initial state
+                        initial_state: SagaState = {
+                            "messages": [HumanMessage(content=f"{task.name}: {task.description}")],
+                            "task_data": {},
+                            "current_task": "",
+                            "completed_tasks": [],
+                            "failed_tasks": [],
+                            "task_results": {},
+                            "task_outputs": {},
+                            "compensation_stack": [],
+                            "saga_status": "active",
+                            "failure_reason": "",
+                            "failed_tool": ""
                         }
-                    
-                    # Collect actions from this attempt
-                    all_executed_actions.extend(execution_result.get('executed_actions', []))
-                    
-                    if execution_result['success']:
-                        logger.info("Execution successful!")
-                        recorder.finish(status="success")
                         
-                        # Convert executed_actions to tool_calls format
-                        tool_calls = []
-                        for action in all_executed_actions:
-                            tool_calls.append({
-                                "step": action.get('task_id'),
-                                "tool": action.get('agent'),
-                                "status": action.get('status'),
-                            })
+                        # Run workflow
+                        final_state = None
+                        for event in workflow.stream(initial_state):
+                            for node, state in event.items():
+                                logger.info(f"[Workflow] Node: {node}")
+                                final_state = state
                         
-                        return RunnerResult(
-                            task_id=task.task_id,
-                            framework=self.framework_name,
-                            success=True,
-                            execution_time=0,
-                            tool_calls=tool_calls,
-                            messages=[],
-                            raw_output=execution_result,
-                            trace=recorder.trace.to_dict(),
-                        )
-                    
-                    # ============================================================
-                    # PHASE 4: COMPENSATION (if execution failed)
-                    # ============================================================
-                    logger.info(f"Execution failed: {execution_result.get('error')}. Phase 4: Compensation")
-                    
-                    comp_step_id = recorder.start_step("compensation", "saga_phase4", {
-                        "failed_task": execution_result.get('failed_task'),
-                        "actions_to_compensate": len(execution_result.get('executed_actions', []))
-                    })
-                    
-                    try:
-                        compensation_result = code_generator.execute_compensation(
-                            workflow=generated_workflow,
-                            executed_actions=execution_result.get('executed_actions', []),
-                            namespace=execution_result.get('namespace', {}),
-                            tools=tools
-                        )
-                        
-                        recorder.end_step(comp_step_id, output={
-                            "compensations_executed": len(compensation_result.get('compensation_results', []))
-                        })
-                        
-                        comp_actions_this_iter = compensation_result.get('compensation_results', [])
-                        all_compensation_actions.extend(comp_actions_this_iter)
-                        
+                        # Process Result
+                        if final_state:
+                            saga_status = final_state.get('saga_status', 'active')
+                            compensation_stack = final_state.get('compensation_stack', [])
+                            
+                            # Collect outputs
+                            all_tool_calls.extend(compensation_stack)
+                            
+                            if saga_status == 'failed':
+                                # Failed!
+                                failure_reason = final_state.get('failure_reason', 'Unknown error')
+                                failed_tool = final_state.get('failed_tool', 'Unknown')
+                                
+                                logger.warning(f"Execution failed: {failure_reason}")
+                                recorder.end_step(execution_step_id, output={"success": False, "reason": failure_reason})
+                                
+                                # Record failure in persistent context
+                                persistent_ctx.add_failure(
+                                    reason=failure_reason, 
+                                    failed_tool=failed_tool,
+                                    tool_args=final_state.get('task_data', {}), # Approximate args
+                                    attempt=iteration
+                                )
+                                persistent_ctx.replan_count += 1
+                                
+                                if self.enable_replanning:
+                                    logger.info("Preparing to replan with persistent context...")
+                                else:
+                                    logger.info("Replanning disabled. Stopping.")
+                                    break
+                            else:
+                                # Success!
+                                logger.info("Execution successful!")
+                                recorder.end_step(execution_step_id, output={"success": True})
+                                recorder.finish(status="success")
+                                
+                                # Extract clean tool calls
+                                tool_calls_list = []
+                                for tc in all_tool_calls:
+                                    tool_calls_list.append({
+                                        "tool": tc.get('tool'),
+                                        "args": tc.get('args'),
+                                        "status": "completed"
+                                    })
+                                
+                                return RunnerResult(
+                                    task_id=task.task_id,
+                                    framework=self.framework_name,
+                                    success=True,
+                                    execution_time=0,
+                                    tool_calls=tool_calls_list,
+                                    messages=[],
+                                    raw_output={"final_state": final_state},
+                                    trace=recorder.trace.to_dict(),
+                                )
+                        else:
+                            logger.error("No final state")
+                            break
+                            
                     except Exception as e:
-                        logger.error(f"Compensation failed: {e}")
-                        recorder.end_step(comp_step_id, output=None, error=str(e))
-                        recorder.finish(status="failed", metadata={"error": f"Compensation failed: {e}"})
-                        
-                        return RunnerResult(
-                            task_id=task.task_id,
-                            framework=self.framework_name,
-                            success=False,
-                            execution_time=0,
-                            tool_calls=all_executed_actions,
-                            compensation_actions=all_compensation_actions,
-                            error=f"Compensation failed: {e}",
-                            trace=recorder.trace.to_dict(),
-                        )
-
-                    if self.enable_replanning:
-                        logger.info("Compensation successful. Preparing to replan.")
-                        failure_reason = execution_result.get("error", "Unknown error")
-                        failed_step = execution_result.get("failed_task", "?")
-                        
-                        # Add to context
-                        context_msg = f"Attempt {iteration} failed at step {failed_step}: {failure_reason}. " \
-                                      f"The system has been rolled back. You must try a DIFFERENT approach."
-                        failure_context.append(context_msg)
-                    else:
-                        logger.info("Replanning disabled. Stopping.")
-                        break
+                        logger.error(f"Execution exception: {e}")
+                        recorder.end_step(execution_step_id, output=None, error=str(e))
+                        persistent_ctx.add_failure(str(e), "unknown", {}, iteration)
                         
                 except Exception as e:
                     logger.error(f"Iteration {iteration} failed: {e}")
-                    # Try last-ditch compensation
-                    try:
-                        if 'generated_workflow' in locals() and 'execution_result' in locals():
-                            code_generator.execute_compensation(
-                                workflow=generated_workflow,
-                                executed_actions=execution_result.get('executed_actions', []),
-                                namespace=execution_result.get('namespace', {}),
-                                tools=tools
-                            )
-                    except:
-                        pass
-                    
-                    recorder.finish(status="failed", metadata={"error": str(e)})
-                    return RunnerResult(
-                        task_id=task.task_id,
-                        framework=self.framework_name,
-                        success=False,
-                        execution_time=0,
-                        error=str(e),
-                        trace=recorder.trace.to_dict(),
-                    )
             
-            # If we exited loop without success
-            recorder.finish(status="failed", metadata={"error": f"Max iterations ({self.max_iterations}) reached"})
+            # End of loop (max iterations)
+            recorder.finish(status="failed", metadata={"error": "Max iterations reached"})
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
                 success=False,
                 execution_time=0,
-                tool_calls=all_executed_actions,
+                tool_calls=all_tool_calls,
                 compensation_actions=all_compensation_actions,
-                error=f"Max iterations ({self.max_iterations}) reached without success.",
+                error=f"Max iterations ({self.max_iterations}) reached.",
                 trace=recorder.trace.to_dict(),
             )
+
+
             
         except Exception as e:
             logger.error(f"SagaLLM runner failed: {e}")
