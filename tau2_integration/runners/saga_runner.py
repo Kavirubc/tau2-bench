@@ -382,6 +382,12 @@ IMPORTANT:
 - "reasoning": why this step is needed
 
 Respond with ONLY the JSON list, no other text.
+
+META-STRATEGIES (Use these to structure your plan):
+1. **DECOMPOSITION**: If the user asks for multiple things (e.g., "flight and hotel", "two different flights"), do NOT try to do them in one step. Create distinct steps for each entitlement.
+2. **VERIFICATION FIRST**: Before modifying a reservation (cancel/change), ALWAYS add a step to "get_reservation_details" or "search_..." to verify its current status.
+3. **ISOLATION**: If a tool fails, it should not break independent parts of the plan. Keep independent objectives in separate logical groups of steps.
+4. **ARGUMENT PRECISION**: Do not guess IDs. Use the output of a search step (e.g., `{{flight_id_from_step_X}}`) as the input for a booking step.
 """
         
         # Add failure context if available

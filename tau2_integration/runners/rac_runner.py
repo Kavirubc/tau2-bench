@@ -333,13 +333,25 @@ IMPORTANT:
         self, 
         tools: Dict[str, Any]
     ) -> List[StructuredTool]:
-        """Convert τ²-bench tools to LangChain StructuredTool format."""
+        """Convert τ²-bench tools to LangChain StructuredTool format with normalization."""
         langchain_tools = []
         
         for name, func in tools.items():
+            # Create a wrapper that normalizes output
+            def create_wrapper(f, tool_name):
+                def wrapped_func(**kwargs):
+                    try:
+                        result = f(**kwargs)
+                        return self._normalize_tool_output(result, tool_name)
+                    except Exception as e:
+                        return f'{{"status": "failed", "error": "{str(e)}"}}'
+                return wrapped_func
+            
+            wrapped = create_wrapper(func, name)
+            
             # Create a StructuredTool from the method
             tool = StructuredTool.from_function(
-                func=func,
+                func=wrapped,
                 name=name,
                 description=func.__doc__ or f"Tool: {name}",
             )
@@ -347,6 +359,45 @@ IMPORTANT:
             logger.debug(f"[RAC] Converted tool: {name}")
         
         return langchain_tools
+    
+    def _normalize_tool_output(self, result: Any, tool_name: str) -> str:
+        """
+        Normalize real-world tool output to clean JSON for RAC.
+        
+        REALM-Bench expects: {"status": "failed", "error": "..."} for failures.
+        Real tools might return weird strings or partial dicts.
+        """
+        import json
+        
+        # If it's already a dict, check for failure signals
+        if isinstance(result, dict):
+            # Check for explicit failure keys
+            if "error" in result and result["error"]:
+                 result["status"] = "failed"
+            return json.dumps(result)
+            
+        # If it's a string, try to parse it
+        if isinstance(result, str):
+            try:
+                # Try to clean up common issues
+                cleaned = result.strip()
+                if not cleaned.startswith("{") and "error" in cleaned.lower():
+                     return json.dumps({"status": "failed", "error": cleaned})
+                     
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict):
+                    if "error" in parsed and parsed["error"]:
+                        parsed["status"] = "failed"
+                        return json.dumps(parsed)
+            except:
+                # parsing failed, treat as raw string. 
+                # If concise enough, it's fine. If too long/noisy, might confuse RAC.
+                # Heuristic: if it contains "fail" or "error", force status=failed
+                if "fail" in result.lower() or "error" in result.lower():
+                    return json.dumps({"status": "failed", "error": result[:200]})
+        
+        # Default pass-through
+        return str(result)
     
     def _extract_tool_calls(self, messages: List[Any]) -> List[Dict[str, Any]]:
         """Extract tool calls from message history."""

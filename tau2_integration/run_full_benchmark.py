@@ -38,6 +38,7 @@ from tau2_integration.task_adapter import load_tau2_tasks
 from tau2_integration.runners.langgraph_runner import LangGraphRunner
 from tau2_integration.runners.rac_runner import RACRunner
 from tau2_integration.runners.saga_runner import SagaLLMRunner
+from tau2_integration.runners.prompt_engineer_langgraph_runner import PromptEngineerLangGraphRunner
 from tau2_integration.evaluation import evaluate_run, compare_frameworks, print_comparison_table, EvaluationMetrics
 from tau2_integration.domain_registry import DomainRegistry
 
@@ -210,6 +211,8 @@ def run_full_benchmark(
         runners["rac"] = RACRunner(model=model)
     if "sagallm" in frameworks:
         runners["sagallm"] = SagaLLMRunner(model=model)
+    if "prompt_engineer_langgraph" in frameworks:
+        runners["prompt_engineer_langgraph"] = PromptEngineerLangGraphRunner(model=model)
     
     logger.info(f"Initialized {len(runners)} runners: {list(runners.keys())}")
     
