@@ -142,6 +142,21 @@ class LangGraphRunner(BaseFrameworkRunner):
             all_messages = result.get("messages", [])
             tool_calls_made = self._extract_tool_calls_from_messages(all_messages)
             
+            # Construct synthetic trace for metrics
+            trace_steps = []
+            for msg in all_messages:
+                if msg.type == "ai":
+                    usage = msg.usage_metadata if hasattr(msg, "usage_metadata") else {}
+                    if usage:
+                        trace_steps.append({
+                            "type": "llm",
+                            "tokens": {
+                                "input": usage.get("input_tokens", 0),
+                                "output": usage.get("output_tokens", 0),
+                                "total": usage.get("total_tokens", 0),
+                            }
+                        })
+            
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
@@ -150,6 +165,7 @@ class LangGraphRunner(BaseFrameworkRunner):
                 tool_calls=tool_calls_made,
                 messages=[self._message_to_dict(m) for m in all_messages],
                 raw_output=result,
+                trace={"steps": trace_steps}
             )
             
         except ToolExecutionError as e:

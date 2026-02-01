@@ -168,16 +168,31 @@ class SagaWorkflowBuilder:
             if state.get("saga_status") == "compensating":
                 return {"current_task": task_id}
             
+            # Check if task is already completed
+            if task_id in state.get("completed_tasks", []):
+                logger.info(f"[{task_id}] Already completed, skipping")
+                return {"current_task": task_id}
+
             # Build context-aware prompt
             messages = state.get('messages', [])
             
             # Add task instruction
+            task_args = task_spec.get('args', {})
+            try:
+                task_args_str = json.dumps(task_args, indent=2)
+            except:
+                task_args_str = str(task_args)
+
             task_message = HumanMessage(content=f"""Execute this task:
 
 Task: {task_name}
 Description: {task_description}
+Suggested Arguments:
+{task_args_str}
 
-Use the available tools to complete this task. Call the appropriate tool with the correct parameters based on the task description.
+Use the available tools to complete this task using the suggested arguments.
+YOU MUST CALL THE TOOL IMMEDIATELY. DO NOT ASK FOR CONFIRMATION.
+DO NOT output text, only tool calls.
 """)
             
             messages_with_task = messages + [task_message]
@@ -240,8 +255,12 @@ Use the available tools to complete this task. Call the appropriate tool with th
                 
                 if tool_name in tool_map:
                     try:
-                        result = tool_map[tool_name].invoke(tool_args)
-                        
+                        tool_func = tool_map[tool_name]
+                        if hasattr(tool_func, "invoke"):
+                            result = tool_func.invoke(tool_args)
+                        else:
+                            result = tool_func(**tool_args)
+                            
                         logger.info(f"Tool {tool_name} result: {result}")
                         
                         # Track for compensation
@@ -282,6 +301,13 @@ Use the available tools to complete this task. Call the appropriate tool with th
                 'messages': tool_messages,
                 'compensation_stack': compensation_stack
             }
+            
+            # Mark current task as completed if successful
+            current_task = state.get('current_task')
+            if current_task and not failed:
+                completed = state.get('completed_tasks', [])
+                if current_task not in completed:
+                    result['completed_tasks'] = completed + [current_task]
             
             if failed:
                 result['saga_status'] = 'compensating'
@@ -349,11 +375,16 @@ Use the available tools to complete this task. Call the appropriate tool with th
                                 pass
                         
                         # Call compensation tool
+                        comp_tool_func = tool_map[comp_tool_name]
                         if isinstance(result, dict) and 'id' in result:
-                            comp_result = tool_map[comp_tool_name].invoke({'id': result['id']})
+                            comp_args = {'id': result['id']}
                         else:
-                            # Try with original args
-                            comp_result = tool_map[comp_tool_name].invoke(tool_args)
+                            comp_args = tool_args
+                            
+                        if hasattr(comp_tool_func, "invoke"):
+                            comp_result = comp_tool_func.invoke(comp_args)
+                        else:
+                            comp_result = comp_tool_func(**comp_args)
                         
                         logger.info(f"Compensation result: {comp_result}")
                         compensated.append(tool_name)
@@ -387,13 +418,7 @@ Use the available tools to complete this task. Call the appropriate tool with th
             return "tools"
         
         # Check if we should continue to next task
-        current_task = state.get('current_task', '')
-        completed = state.get('completed_tasks', [])
-        
-        if current_task and current_task not in completed:
-            return "next"
-        
-        return "end"
+        return "next"
     
     def _after_tools(self, state: SagaState) -> str:
         """Determine next step after tool execution."""
