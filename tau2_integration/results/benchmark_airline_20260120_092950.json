@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-01-20T09:25:47.731136",
+  "config": {
+    "domain": "airline",
+    "task_ids": [
+      "5"
+    ],
+    "frameworks": [
+      "sagallm"
+    ],
+    "trials": 1,
+    "model": "gemini-2.0-flash",
+    "tracing_enabled": true
+  },
+  "results": [
+    {
+      "framework": "sagallm",
+      "task_id": "5",
+      "trial": 1,
+      "success": false,
+      "execution_time": 242.44709396362305,
+      "tool_calls": 11,
+      "llm_calls": 12,
+      "input_tokens": 39157,
+      "output_tokens": 3575,
+      "total_tokens": 42732,
+      "compensation_actions": 11,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_sagallm_5_trial1_1768881347.json",
+      "error": "Max iterations (25) reached without success."
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-01-19T09:01:22.708930",
+  "config": {
+    "task_ids": [
+      "0"
+    ],
+    "frameworks": [
+      "langgraph"
+    ],
+    "disruption_scenario": null,
+    "trials": 1,
+    "model": "gemini-2.0-flash"
+  },
+  "results": [
+    {
+      "task_id": "0",
+      "framework": "langgraph",
+      "trial": 1,
+      "success": true,
+      "execution_time": 1.6607072353363037,
+      "tool_calls": 0,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "error": null
+    }
+  ]
+}

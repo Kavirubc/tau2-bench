@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-01-19T09:31:38.818373",
+  "config": {
+    "task_ids": [
+      "44"
+    ],
+    "frameworks": [
+      "rac"
+    ],
+    "disruption_scenario": null,
+    "trials": 1,
+    "model": "gemini-2.0-flash"
+  },
+  "results": [
+    {
+      "task_id": "44",
+      "framework": "rac",
+      "trial": 1,
+      "success": true,
+      "execution_time": 13.391644954681396,
+      "tool_calls": 10,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": true,
+      "error": null
+    }
+  ]
+}

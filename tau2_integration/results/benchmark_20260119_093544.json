@@ -1,0 +1,54 @@
+{
+  "timestamp": "2026-01-19T09:35:37.787731",
+  "config": {
+    "task_ids": [
+      "8"
+    ],
+    "frameworks": [
+      "langgraph",
+      "rac",
+      "sagallm"
+    ],
+    "disruption_scenario": null,
+    "trials": 1,
+    "model": "gemini-2.0-flash"
+  },
+  "results": [
+    {
+      "task_id": "8",
+      "framework": "langgraph",
+      "trial": 1,
+      "success": true,
+      "execution_time": 1.8256521224975586,
+      "tool_calls": 0,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "error": null
+    },
+    {
+      "task_id": "8",
+      "framework": "rac",
+      "trial": 1,
+      "success": true,
+      "execution_time": 2.7045907974243164,
+      "tool_calls": 1,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": true,
+      "error": null
+    },
+    {
+      "task_id": "8",
+      "framework": "sagallm",
+      "trial": 1,
+      "success": false,
+      "execution_time": 2.182666063308716,
+      "tool_calls": 2,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": true,
+      "error": "AirlineTools.book_reservation() missing 8 required positional arguments: 'flight_type', 'cabin', 'flights', 'passengers', 'payment_methods', 'total_baggages', 'nonfree_baggages', and 'insurance'"
+    }
+  ]
+}

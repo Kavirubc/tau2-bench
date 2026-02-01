@@ -1,0 +1,54 @@
+{
+  "timestamp": "2026-01-19T09:14:50.583575",
+  "config": {
+    "task_ids": [
+      "0"
+    ],
+    "frameworks": [
+      "langgraph",
+      "rac",
+      "sagallm"
+    ],
+    "disruption_scenario": null,
+    "trials": 1,
+    "model": "gemini-2.0-flash"
+  },
+  "results": [
+    {
+      "task_id": "0",
+      "framework": "langgraph",
+      "trial": 1,
+      "success": true,
+      "execution_time": 1.6696112155914307,
+      "tool_calls": 0,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "error": null
+    },
+    {
+      "task_id": "0",
+      "framework": "rac",
+      "trial": 1,
+      "success": true,
+      "execution_time": 1.5065829753875732,
+      "tool_calls": 0,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": true,
+      "error": null
+    },
+    {
+      "task_id": "0",
+      "framework": "sagallm",
+      "trial": 1,
+      "success": true,
+      "execution_time": 2.3129279613494873,
+      "tool_calls": 3,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "error": null
+    }
+  ]
+}

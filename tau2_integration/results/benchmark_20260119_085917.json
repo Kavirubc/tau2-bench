@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-01-19T08:59:16.680588",
+  "config": {
+    "task_ids": [
+      "0"
+    ],
+    "frameworks": [
+      "langgraph"
+    ],
+    "disruption_scenario": null,
+    "trials": 1,
+    "model": "gpt-4o-mini"
+  },
+  "results": [
+    {
+      "task_id": "0",
+      "framework": "langgraph",
+      "trial": 1,
+      "success": false,
+      "execution_time": 0.8168830871582031,
+      "tool_calls": 0,
+      "disruptions_triggered": 0,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "error": "1 validation error for ChatGoogleGenerativeAI\n  Value error, API key required for Gemini Developer API. Provide api_key parameter or set GOOGLE_API_KEY/GEMINI_API_KEY environment variable. [type=value_error, input_value={'model': 'gpt-4o-mini', ...one, 'model_kwargs': {}}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.12/v/value_error"
+    }
+  ]
+}
