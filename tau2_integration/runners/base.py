@@ -128,11 +128,13 @@ class BaseFrameworkRunner(ABC):
         # Reset and configure disruption engine
         engine = get_disruption_engine()
         engine.reset()
-        
+
         if disruption_scenarios:
-            engine.configure(disruption_scenarios)
+            # Infer domain from task if available, default to airline
+            domain = getattr(task, 'domain', 'airline') if hasattr(task, 'domain') else 'airline'
+            engine.configure(disruption_scenarios, domain=domain)
             engine.enable()
-            logger.info(f"Configured {len(disruption_scenarios)} disruption scenarios")
+            logger.info(f"Configured {len(disruption_scenarios)} disruption scenarios for domain '{domain}'")
         else:
             engine.disable()
         

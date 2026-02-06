@@ -1,0 +1,28 @@
+{
+  "steps": [
+    {
+      "type": "llm",
+      "tokens": {
+        "input": 4654,
+        "output": 116,
+        "total": 4770
+      }
+    },
+    {
+      "type": "llm",
+      "tokens": {
+        "input": 4955,
+        "output": 595,
+        "total": 5550
+      }
+    },
+    {
+      "type": "llm",
+      "tokens": {
+        "input": 5295,
+        "output": 907,
+        "total": 6202
+      }
+    }
+  ]
+}

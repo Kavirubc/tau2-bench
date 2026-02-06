@@ -1,0 +1,60 @@
+{
+  "timestamp": "2026-02-06T17:04:09.748091",
+  "config": {
+    "domain": "airline",
+    "task_ids": [
+      "37"
+    ],
+    "frameworks": [
+      "rac",
+      "sagallm"
+    ],
+    "trials": 1,
+    "model": "gemini-2.5-flash",
+    "tracing_enabled": true
+  },
+  "results": [
+    {
+      "framework": "rac",
+      "task_id": "37",
+      "trial": 1,
+      "success": true,
+      "execution_time": 16.229446172714233,
+      "tool_calls": 7,
+      "llm_calls": 8,
+      "input_tokens": 36414,
+      "output_tokens": 1324,
+      "total_tokens": 37738,
+      "compensation_actions": 0,
+      "legitimate_compensations": 0,
+      "total_compensations": 0,
+      "recovery_attempts": 1,
+      "successful_recoveries": 0,
+      "disruptions_fired": 1,
+      "rollback_success": true,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_rac_37_trial1_1770377649.json",
+      "error": null
+    },
+    {
+      "framework": "sagallm",
+      "task_id": "37",
+      "trial": 1,
+      "success": true,
+      "execution_time": 24.093367099761963,
+      "tool_calls": 2,
+      "llm_calls": 4,
+      "input_tokens": 18403,
+      "output_tokens": 3367,
+      "total_tokens": 21770,
+      "compensation_actions": 0,
+      "legitimate_compensations": 0,
+      "total_compensations": 0,
+      "recovery_attempts": 0,
+      "successful_recoveries": 0,
+      "disruptions_fired": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_sagallm_37_trial1_1770377665.json",
+      "error": null
+    }
+  ]
+}
