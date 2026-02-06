@@ -19,6 +19,8 @@ from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, ToolMe
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.graph import StateGraph, END
 
+from .disruption_engine import get_disruption_engine
+
 logger = logging.getLogger("tau2_integration.saga_workflow_builder")
 
 
@@ -66,9 +68,10 @@ class SagaWorkflowBuilder:
     rather than generating hard-coded tool calls.
     """
     
-    def __init__(self, model: str = "gemini-2.0-flash"):
+    def __init__(self, model: str = "gemini-2.0-flash", recorder: Any = None):
         self.model = model
         self.llm = None
+        self.recorder = recorder
     
     def build_workflow(
         self,
@@ -166,6 +169,8 @@ class SagaWorkflowBuilder:
             
             # Check if we're in compensation mode
             if state.get("saga_status") == "compensating":
+                if self.recorder:
+                    self.recorder.record_event("saga_node_compensating", {"task_id": task_id})
                 return {"current_task": task_id}
             
             # Check if task is already completed
@@ -255,6 +260,17 @@ DO NOT output text, only tool calls.
                 
                 if tool_name in tool_map:
                     try:
+                        # Trace tool start
+                        step_id = None
+                        if self.recorder:
+                            step_id = self.recorder.start_step("tool", tool_name, tool_args)
+
+                        # Check for disruptions
+                        disruption_engine = get_disruption_engine()
+                        disruption_error = disruption_engine.check_disruption(tool_name, tool_args)
+                        if disruption_error:
+                            raise Exception(disruption_error)
+
                         tool_func = tool_map[tool_name]
                         if hasattr(tool_func, "invoke"):
                             result = tool_func.invoke(tool_args)
@@ -262,6 +278,10 @@ DO NOT output text, only tool calls.
                             result = tool_func(**tool_args)
                             
                         logger.info(f"Tool {tool_name} result: {result}")
+                        
+                        # Trace tool end
+                        if step_id:
+                            self.recorder.end_step(step_id, output=str(result))
                         
                         # Track for compensation
                         compensation_stack.append({
@@ -281,6 +301,10 @@ DO NOT output text, only tool calls.
                         failed = True
                         failed_tool = tool_name
                         failure_reason = str(e)
+                        
+                        # Trace tool error
+                        if step_id:
+                            self.recorder.end_step(step_id, output=None, error=str(e))
                         
                         tool_messages.append(ToolMessage(
                             content=f"Error: {e}",
@@ -314,6 +338,11 @@ DO NOT output text, only tool calls.
                 result['failed_tool'] = failed_tool
                 result['failure_reason'] = failure_reason
                 logger.warning(f"Tool execution failed, triggering compensation")
+                if self.recorder:
+                    self.recorder.record_event("saga_failure_triggered_compensation", {
+                        "failed_tool": failed_tool,
+                        "failure_reason": failure_reason
+                    })
             
             return result
         
@@ -381,22 +410,37 @@ DO NOT output text, only tool calls.
                         else:
                             comp_args = tool_args
                             
+                        # Trace compensation start
+                        comp_step_id = None
+                        if self.recorder:
+                            comp_step_id = self.recorder.start_step("compensation", comp_tool_name, comp_args, {"original_tool": tool_name})
+
                         if hasattr(comp_tool_func, "invoke"):
                             comp_result = comp_tool_func.invoke(comp_args)
                         else:
                             comp_result = comp_tool_func(**comp_args)
                         
                         logger.info(f"Compensation result: {comp_result}")
+                        
+                        # Trace compensation end
+                        if comp_step_id:
+                            self.recorder.end_step(comp_step_id, output=str(comp_result))
+                            
                         compensated.append(tool_name)
                         
                     except Exception as e:
                         logger.error(f"Compensation failed for {tool_name}: {e}")
+                        if comp_step_id:
+                            self.recorder.end_step(comp_step_id, output=None, error=str(e))
                 else:
                     logger.warning(f"No compensation tool for {tool_name}")
             
             logger.info(f"Compensation complete. {len(compensated)} actions rolled back.")
             logger.info(f"=========================")
             
+            if self.recorder:
+                self.recorder.record_event("saga_compensation_complete", {"rolled_back": len(compensated)})
+                
             return {
                 'saga_status': 'failed',
                 'compensation_stack': [],

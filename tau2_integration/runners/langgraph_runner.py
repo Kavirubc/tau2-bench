@@ -204,7 +204,7 @@ class LangGraphRunner(BaseFrameworkRunner):
                     disruption_engine = get_disruption_engine()
                     disruption_error = disruption_engine.check_disruption(tool_name, kwargs)
                     if disruption_error:
-                        return f'{{"status": "failed", "error": "{disruption_error}"}}'
+                        raise ToolExecutionError(disruption_error)
                     return f(*args, **kwargs)
                 return wrapped_func
 

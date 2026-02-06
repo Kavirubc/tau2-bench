@@ -89,10 +89,29 @@ class TraceRecorder:
             start_time=time.time()
         )
         self.active_steps: Dict[str, TraceStep] = {}
+        self.context_stack: List[Dict[str, Any]] = []
+        
+    def push_context(self, context: Dict[str, Any]):
+        """Push a new context onto the stack."""
+        self.context_stack.append(context)
+        
+    def pop_context(self) -> Optional[Dict[str, Any]]:
+        """Pop the current context."""
+        if self.context_stack:
+            return self.context_stack.pop()
+        return None
         
     def start_step(self, step_type: str, name: str, input_data: Any, metadata: Dict[str, Any] = None) -> str:
         """Start recording a step. Returns step_id."""
         step_id = str(uuid.uuid4())
+        
+        # Merge global metadata from context stack
+        merged_metadata = {}
+        for ctx in self.context_stack:
+            merged_metadata.update(ctx)
+        if metadata:
+            merged_metadata.update(metadata)
+            
         step = TraceStep(
             step_id=step_id,
             step_type=step_type,
@@ -102,10 +121,31 @@ class TraceRecorder:
             start_time=time.time(),
             end_time=0.0,
             duration=0.0,
-            metadata=metadata or {}
+            metadata=merged_metadata
         )
         self.active_steps[step_id] = step
         return step_id
+        
+    def record_event(self, name: str, data: Any = None, metadata: Dict[str, Any] = None):
+        """Record an instantaneous event."""
+        merged_metadata = {}
+        for ctx in self.context_stack:
+            merged_metadata.update(ctx)
+        if metadata:
+            merged_metadata.update(metadata)
+            
+        step = TraceStep(
+            step_id=str(uuid.uuid4()),
+            step_type="event",
+            name=name,
+            input=data,
+            output=None,
+            start_time=time.time(),
+            end_time=time.time(),
+            duration=0.0,
+            metadata=merged_metadata
+        )
+        self.trace.steps.append(step)
         
     def end_step(self, step_id: str, output: Any, error: Optional[str] = None, tokens: Dict[str, int] = None):
         """End recording a step."""

@@ -27,6 +27,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .base import BaseFrameworkRunner, RunnerResult
 from ..task_adapter import Tau2TaskDefinition, get_task_query
 from ..wrapped_tools import AIRLINE_COMPENSATION_MAPPING
+from ..disruption_engine import get_disruption_engine
 
 logger = logging.getLogger("tau2_integration.runners.rac")
 
@@ -220,6 +221,7 @@ class RACRunner(BaseFrameworkRunner):
         all_messages = []
         rollback_success = False
         
+        recorder.push_context({"phase": "react"})
         try:
             # Configure run with metadata for Langsmith
             run_config = {
@@ -267,6 +269,7 @@ class RACRunner(BaseFrameworkRunner):
                     logger.debug(f"Could not get compensation history: {e}")
             
             recorder.finish(status="success")
+            recorder.pop_context()
             
             return RunnerResult(
                 task_id=task.task_id,
@@ -284,6 +287,7 @@ class RACRunner(BaseFrameworkRunner):
         except Exception as e:
             logger.error(f"[RAC] Agent execution failed: {e}")
             recorder.finish(status="failed", metadata={"error": str(e)})
+            recorder.pop_context()
             
             # Try to get compensation history even on failure
             comp_history = []
@@ -341,6 +345,12 @@ IMPORTANT:
             def create_wrapper(f, tool_name):
                 def wrapped_func(**kwargs):
                     try:
+                        # Check for disruptions
+                        disruption_engine = get_disruption_engine()
+                        disruption_error = disruption_engine.check_disruption(tool_name, kwargs)
+                        if disruption_error:
+                            return f'{{"status": "failed", "error": "{disruption_error}"}}'
+
                         result = f(**kwargs)
                         return self._normalize_tool_output(result, tool_name)
                     except Exception as e:
