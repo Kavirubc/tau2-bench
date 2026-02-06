@@ -1,0 +1,36 @@
+{
+  "trace_id": "678300e4-bdf8-477f-8b6a-440322dba604",
+  "task_id": "3",
+  "framework": "sagallm",
+  "start_time": 1770361334.637204,
+  "end_time": 1770361334.944761,
+  "duration": 0.3075571060180664,
+  "status": "failed",
+  "total_tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0
+  },
+  "metadata": {
+    "error": "Max iterations reached"
+  },
+  "steps": [
+    {
+      "step_id": "9b894be0-103e-48a2-abe4-f62a11a861f7",
+      "type": "llm",
+      "name": "chat_generation",
+      "input": "[SystemMessage(content='You are a planning assistant.', additional_kwargs={}, response_metadata={}), HumanMessage(content='You are a planning agent. Generate a step-by-step action plan to accomplish the user\\'s request.\\n\\nAvailable tools:\\n- book_reservation(user_id: str, origin: str, destination: str, flight_type: Literal, cabin: Literal, flights: List, passengers: List, payment_methods: List, total_baggages: int, nonfree_baggages: int, insurance: Literal)\\n  Book a reservation.\\n\\nArgs:\\n    user_id: The ID of the user to book the reservation such as \\'sara_doe_496\\'`.\\n    origin: The IATA code for the origin city such as \\'SFO\\'.\\n    destination: The IATA code for the destination city such as \\'JFK\\'.\\n    flight_type: The type of flight such as \\'one_way\\' or \\'round_trip\\'.\\n    cabin: The cabin class such as \\'basic_economy\\', \\'economy\\', or \\'business\\'.\\n    flights: An array of objects containing details about each piece of flight.\\n    passengers: An array of objects cont",
+      "output": "None",
+      "start_time": 1770361334.733406,
+      "end_time": 1770361334.942235,
+      "duration": 0.20882892608642578,
+      "tokens": {},
+      "error": "Error calling model 'gemini-2.0-flash-exp' (NOT_FOUND): 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-2.0-flash-exp is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}",
+      "metadata": {
+        "phase": "planning",
+        "iteration": 1,
+        "model": null
+      }
+    }
+  ]
+}

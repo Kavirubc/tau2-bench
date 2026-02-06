@@ -54,7 +54,7 @@ DEFAULT_OUTPUT_DIR = Path(__file__).parent / "results"
 DEFAULT_TRACE_DIR = Path(__file__).parent / "results" / "traces"
 
 # Default model and domain
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"
 DEFAULT_DOMAIN = "airline"
 
 # Task-specific disruption mapping

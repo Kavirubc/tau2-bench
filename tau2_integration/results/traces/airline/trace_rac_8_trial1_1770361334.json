@@ -1,0 +1,35 @@
+{
+  "trace_id": "cbbb588b-d4f3-4b93-9eee-880bed65fa9f",
+  "task_id": "8",
+  "framework": "rac",
+  "start_time": 1770361334.945426,
+  "end_time": 1770361335.319684,
+  "duration": 0.37425804138183594,
+  "status": "failed",
+  "total_tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0
+  },
+  "metadata": {
+    "error": "Error calling model 'gemini-2.0-flash-exp' (NOT_FOUND): 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-2.0-flash-exp is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}"
+  },
+  "steps": [
+    {
+      "step_id": "dcfc83a9-ce0c-4cb7-9846-7eab7ae429ab",
+      "type": "llm",
+      "name": "chat_generation",
+      "input": "[SystemMessage(content='You are a customer service agent for an airline.\\n\\nYour job is to help customers with their flight bookings, modifications, and cancellations.\\n\\nIMPORTANT RULES:\\n- Always obtain user confirmation before making any changes\\n- Make only one tool call at a time\\n- Follow the policy guidelines strictly\\n\\nPOLICY:\\n# Airline Agent Policy\\n\\nThe current time is 2024-05-15 15:00:00 EST.\\n\\nAs an airline agent, you can help users **book**, **modify**, or **cancel** flight reservations. You also handle **refunds and compensation**.\\n\\nBefore taking any actions that update the booking database (booking, modifying flights, editing baggage, changing cabin class, or updating passenger information), you must list the action details and obtain explicit user confirmation (yes) to proceed.\\n\\nYou should not provide any information, knowledge, or procedures not provided by the user or available tools, or give subjective recommendations or comments.\\n\\nYou should only make one ",
+      "output": "None",
+      "start_time": 1770361335.075892,
+      "end_time": 1770361335.3081338,
+      "duration": 0.23224186897277832,
+      "tokens": {},
+      "error": "Error calling model 'gemini-2.0-flash-exp' (NOT_FOUND): 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-2.0-flash-exp is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}",
+      "metadata": {
+        "phase": "react",
+        "model": null
+      }
+    }
+  ]
+}

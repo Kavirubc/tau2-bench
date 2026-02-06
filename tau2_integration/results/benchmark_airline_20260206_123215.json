@@ -1,0 +1,103 @@
+{
+  "timestamp": "2026-02-06T12:32:13.896088",
+  "config": {
+    "domain": "airline",
+    "task_ids": [
+      "3",
+      "8"
+    ],
+    "frameworks": [
+      "rac",
+      "sagallm"
+    ],
+    "trials": 1,
+    "model": "gemini-2.0-flash-exp",
+    "tracing_enabled": true
+  },
+  "results": [
+    {
+      "framework": "rac",
+      "task_id": "3",
+      "trial": 1,
+      "success": false,
+      "execution_time": 0.7404789924621582,
+      "tool_calls": 0,
+      "llm_calls": 1,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "compensation_actions": 0,
+      "legitimate_compensations": 0,
+      "total_compensations": 0,
+      "recovery_attempts": 0,
+      "successful_recoveries": 0,
+      "disruptions_fired": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_rac_3_trial1_1770361333.json",
+      "error": "Error calling model 'gemini-2.0-flash-exp' (NOT_FOUND): 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-2.0-flash-exp is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}"
+    },
+    {
+      "framework": "sagallm",
+      "task_id": "3",
+      "trial": 1,
+      "success": false,
+      "execution_time": 0.3076779842376709,
+      "tool_calls": 0,
+      "llm_calls": 1,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "compensation_actions": 0,
+      "legitimate_compensations": 0,
+      "total_compensations": 0,
+      "recovery_attempts": 0,
+      "successful_recoveries": 0,
+      "disruptions_fired": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_sagallm_3_trial1_1770361334.json",
+      "error": "Max iterations (3) reached."
+    },
+    {
+      "framework": "rac",
+      "task_id": "8",
+      "trial": 1,
+      "success": false,
+      "execution_time": 0.37435197830200195,
+      "tool_calls": 0,
+      "llm_calls": 1,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "compensation_actions": 0,
+      "legitimate_compensations": 0,
+      "total_compensations": 0,
+      "recovery_attempts": 0,
+      "successful_recoveries": 0,
+      "disruptions_fired": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_rac_8_trial1_1770361334.json",
+      "error": "Error calling model 'gemini-2.0-flash-exp' (NOT_FOUND): 404 NOT_FOUND. {'error': {'code': 404, 'message': 'models/gemini-2.0-flash-exp is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.', 'status': 'NOT_FOUND'}}"
+    },
+    {
+      "framework": "sagallm",
+      "task_id": "8",
+      "trial": 1,
+      "success": false,
+      "execution_time": 0.4022789001464844,
+      "tool_calls": 0,
+      "llm_calls": 1,
+      "input_tokens": 0,
+      "output_tokens": 0,
+      "total_tokens": 0,
+      "compensation_actions": 0,
+      "legitimate_compensations": 0,
+      "total_compensations": 0,
+      "recovery_attempts": 0,
+      "successful_recoveries": 0,
+      "disruptions_fired": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_sagallm_8_trial1_1770361335.json",
+      "error": "Max iterations (3) reached."
+    }
+  ]
+}
