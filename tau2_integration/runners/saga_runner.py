@@ -224,12 +224,18 @@ IMPORTANT: Execute ALL steps in the plan. Do not stop early.
                         recorder.finish(status="success")
                         recorder.pop_context()
 
+                        # Get recovery metrics from disruption engine
+                        disruption_engine = get_disruption_engine()
+                        recovery_metrics = disruption_engine.get_recovery_metrics()
+
                         return RunnerResult(
                             task_id=task.task_id,
                             framework=self.framework_name,
                             success=True,
                             execution_time=0,
                             tool_calls=all_tool_calls,
+                            recovery_attempts=recovery_metrics["retry_attempts"],
+                            successful_recoveries=recovery_metrics["successful_recoveries"],
                             messages=[self._message_to_dict(m) for m in all_messages],
                             raw_output=result,
                             trace=recorder.trace.to_dict(),
@@ -244,7 +250,10 @@ IMPORTANT: Execute ALL steps in the plan. Do not stop early.
                         if self._executed_actions:
                             logger.info("Phase 3: Compensation")
                             recorder.push_context({"phase": "compensation", "iteration": iteration})
-                            comp_result = self._compensate(tools, recorder)
+                            # Get disruption context for legitimate compensation tracking
+                            disruption_engine = get_disruption_engine()
+                            triggered_disruptions = disruption_engine.get_triggered_disruptions()
+                            comp_result = self._compensate(tools, recorder, triggered_disruptions)
                             all_compensation_actions.extend(comp_result.get("actions", []))
                             recorder.pop_context()
 
@@ -260,6 +269,15 @@ IMPORTANT: Execute ALL steps in the plan. Do not stop early.
 
             # End of loop
             recorder.finish(status="failed", metadata={"error": "Max iterations reached"})
+
+            # Calculate compensation metrics
+            legitimate_comps = sum(a.get("is_legitimate", False) for a in all_compensation_actions)
+            total_comps = len(all_compensation_actions)
+
+            # Get recovery metrics
+            disruption_engine = get_disruption_engine()
+            recovery_metrics = disruption_engine.get_recovery_metrics()
+
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
@@ -267,6 +285,10 @@ IMPORTANT: Execute ALL steps in the plan. Do not stop early.
                 execution_time=0,
                 tool_calls=all_tool_calls,
                 compensation_actions=all_compensation_actions,
+                legitimate_compensations=legitimate_comps,
+                total_compensations=total_comps,
+                recovery_attempts=recovery_metrics["retry_attempts"],
+                successful_recoveries=recovery_metrics["successful_recoveries"],
                 error=f"Max iterations ({self.max_iterations}) reached.",
                 trace=recorder.trace.to_dict(),
             )
@@ -492,43 +514,66 @@ META-STRATEGIES (Use these to structure your plan):
             result["name"] = msg.name
         return result
 
-    def _compensate(self, tools: Dict[str, Any], recorder: Any = None) -> Dict[str, Any]:
+    def _compensate(
+        self,
+        tools: Dict[str, Any],
+        recorder: Any = None,
+        triggered_disruptions: List[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Execute compensation actions for executed actions (in reverse order).
 
         Args:
             tools: Available tools.
+            recorder: Optional trace recorder.
+            triggered_disruptions: List of disruptions that were triggered.
 
         Returns:
-            Compensation result dictionary.
+            Compensation result dictionary with legitimate compensation count.
         """
         compensation_actions = []
         all_success = True
-        
+        legitimate_comps = 0
+
+        # Build set of tools that had disruptions
+        triggered_tools = set()
+        if triggered_disruptions:
+            triggered_tools = {d.get("tool") for d in triggered_disruptions}
+
         # Process in reverse order
         for action in reversed(self._executed_actions):
             tool_name = action["tool"]
             comp_tool = AIRLINE_COMPENSATION_MAPPING.get(tool_name)
-            
+
             if not comp_tool or comp_tool not in tools:
                 logger.warning(f"No compensation for {tool_name}")
                 continue
-            
+
             try:
                 # Build compensation arguments
                 comp_args = self._build_compensation_args(action)
-                
+
                 if comp_args:
+                    # Check if this is a legitimate compensation (caused by disruption)
+                    is_legitimate = tool_name in triggered_tools
+                    if is_legitimate:
+                        legitimate_comps += 1
+
                     # Record compensation start
                     step_id = None
                     if recorder:
-                         step_id = recorder.start_step("compensation_tool", comp_tool, comp_args)
+                         step_id = recorder.start_step(
+                             "compensation_tool",
+                             comp_tool,
+                             comp_args,
+                             metadata={"is_legitimate": is_legitimate}
+                         )
 
                     if hasattr(tools[comp_tool], "invoke"):
                          result = tools[comp_tool].invoke(comp_args)
                     else:
                          result = tools[comp_tool](**comp_args)
-                    
+
                     # Record compensation end
                     if recorder and step_id:
                          recorder.end_step(step_id, output=str(result))
@@ -538,9 +583,10 @@ META-STRATEGIES (Use these to structure your plan):
                         "compensation_tool": comp_tool,
                         "args": comp_args,
                         "success": True,
+                        "is_legitimate": is_legitimate,
                     })
-                    logger.info(f"Compensated {tool_name} with {comp_tool}")
-                    
+                    logger.info(f"Compensated {tool_name} with {comp_tool} (legitimate={is_legitimate})")
+
             except Exception as e:
                 logger.error(f"Compensation for {tool_name} failed: {e}")
                 if recorder and step_id:
@@ -552,10 +598,11 @@ META-STRATEGIES (Use these to structure your plan):
                     "success": False,
                 })
                 all_success = False
-        
+
         return {
             "success": all_success,
             "actions": compensation_actions,
+            "legitimate_count": legitimate_comps,
         }
     
     def _build_compensation_args(

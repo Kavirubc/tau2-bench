@@ -1,0 +1,84 @@
+{
+  "timestamp": "2026-02-06T10:43:11.712400",
+  "config": {
+    "domain": "airline",
+    "task_ids": [
+      "8"
+    ],
+    "frameworks": [
+      "langgraph",
+      "rac",
+      "sagallm",
+      "prompt_engineer_langgraph"
+    ],
+    "trials": 1,
+    "model": "gemini-2.5-flash",
+    "tracing_enabled": true
+  },
+  "results": [
+    {
+      "framework": "langgraph",
+      "task_id": "8",
+      "trial": 1,
+      "success": true,
+      "execution_time": 16.84579610824585,
+      "tool_calls": 7,
+      "llm_calls": 8,
+      "input_tokens": 46691,
+      "output_tokens": 1739,
+      "total_tokens": 48430,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_langgraph_8_trial1_1770354791.json",
+      "error": null
+    },
+    {
+      "framework": "rac",
+      "task_id": "8",
+      "trial": 1,
+      "success": true,
+      "execution_time": 17.837276935577393,
+      "tool_calls": 7,
+      "llm_calls": 8,
+      "input_tokens": 38365,
+      "output_tokens": 1989,
+      "total_tokens": 40354,
+      "compensation_actions": 0,
+      "rollback_success": true,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_rac_8_trial1_1770354808.json",
+      "error": null
+    },
+    {
+      "framework": "sagallm",
+      "task_id": "8",
+      "trial": 1,
+      "success": true,
+      "execution_time": 50.35208582878113,
+      "tool_calls": 6,
+      "llm_calls": 8,
+      "input_tokens": 39532,
+      "output_tokens": 9851,
+      "total_tokens": 49383,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_sagallm_8_trial1_1770354826.json",
+      "error": null
+    },
+    {
+      "framework": "prompt_engineer_langgraph",
+      "task_id": "8",
+      "trial": 1,
+      "success": true,
+      "execution_time": 18.489074230194092,
+      "tool_calls": 7,
+      "llm_calls": 8,
+      "input_tokens": 48195,
+      "output_tokens": 1873,
+      "total_tokens": 50068,
+      "compensation_actions": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_prompt_engineer_langgraph_8_trial1_1770354876.json",
+      "error": null
+    }
+  ]
+}

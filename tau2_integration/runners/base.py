@@ -37,6 +37,13 @@ class RunnerResult:
     compensation_actions: List[Dict[str, Any]] = field(default_factory=list)
     rollback_success: bool = False
     state_clean_after_error: bool = False
+
+    # Enhanced compensation/recovery metrics
+    legitimate_compensations: int = 0     # Compensations triggered by disruptions
+    total_compensations: int = 0          # All compensations executed
+    recovery_attempts: int = 0            # Transient disruption retry attempts
+    successful_recoveries: int = 0        # Transient disruptions that succeeded after retry
+    goal_satisfaction_rate: float = 0.0   # % of task goals achieved (0-1)
     
     # Error information
     error: Optional[str] = None

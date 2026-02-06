@@ -59,12 +59,72 @@ DEFAULT_DOMAIN = "airline"
 
 # Task-specific disruption mapping
 # Maps Task ID -> List of disruption scenario names from disruption_engine.py
+# Strategy:
+# - Inquiry tasks (lookups/verifications): user_lookup_transient - tests retry logic
+# - Booking tasks: flight_unavailable or payment_transient - tests graceful failure and retry
+# - Modification tasks: reservation_update_conflict - tests compensation cascades
+# - Cancellation tasks: user_lookup_transient or payment_transient - tests retry chains
+# - Mixed/complex tasks: multiple disruptions - tests full compensation saga
 TASK_DISRUPTION_MAP = {
-    "3": ["user_lookup_transient"],                          # Transient: agent must retry get_user_details
-    "5": ["user_lookup_transient"],                          # Transient: agent must retry
-    "7": ["user_lookup_transient"],                          # Transient: agent must retry
-    "8": ["flight_unavailable"],                             # Persistent: book_reservation always fails
-    "9": ["reservation_update_conflict"],                    # Persistent: update_reservation_flights always fails
+    # Inquiry/Verification tasks - transient user lookup failures
+    "0": ["user_lookup_transient"],      # Booking verification with user lookup retry
+    "1": ["user_lookup_transient"],      # Cancellation verification with user lookup retry
+    "2": ["user_lookup_transient"],      # Booking with topic change and verification
+    "3": ["user_lookup_transient"],      # Membership status verification
+    "4": ["user_lookup_transient"],      # Cancellation with fraud detection
+    "5": ["user_lookup_transient"],      # Delayed flight complaint with membership check
+    "6": ["user_lookup_transient"],      # Insurance inquiry with user verification
+    "10": ["user_lookup_transient"],     # Cabin change verification
+    "11": ["user_lookup_transient"],     # Passenger count verification
+    "18": ["user_lookup_transient"],     # Downgrade calculation with user lookup
+    "30": ["user_lookup_transient"],     # Bag verification with user lookup
+
+    # Booking tasks - persistent flight unavailable or transient payment failures
+    "7": ["flight_unavailable"],         # Cancellation with new booking attempt - persistent failure
+    "8": ["flight_unavailable"],         # Booking with extra passenger - persistent failure
+    "14": ["payment_transient"],         # Cheapest flight booking - transient payment issue
+    "20": ["payment_transient"],         # Time/payment constrained booking - transient payment
+    "23": ["payment_transient"],         # Multiple bookings with payment efficiency
+    "24": ["payment_transient"],         # Open flight search with payment constraints
+    "25": ["payment_transient"],         # Flight booking with payment specifications
+    "35": ["flight_unavailable"],        # Second choice booking after pressure - persistent failure
+    "40": ["flight_unavailable"],        # Flight change request - persistent unavailable
+    "42": ["payment_transient"],         # Duplicate detection with booking - transient payment
+    "43": ["flight_unavailable"],        # Cancellation check with booking - persistent failure
+    "48": ["user_lookup_transient"],     # 24h ticket detection - user lookup retry
+    "49": ["user_lookup_transient"],     # Insurance denial detection - user lookup retry
+
+    # Modification tasks - reservation update conflicts (persistent)
+    "9": ["reservation_update_conflict"],   # Flight cancellation and modification - persistent conflict
+    "12": ["reservation_update_conflict"],  # Cabin modification attempt - persistent conflict
+    "13": ["reservation_update_conflict"],  # Origin/destination modification - persistent conflict
+    "15": ["reservation_update_conflict"],  # Cheapest economy next day - persistent conflict
+    "16": ["reservation_update_conflict"],  # Cheapest economy next day - persistent conflict
+    "17": ["reservation_update_conflict"],  # Three simultaneous changes - persistent conflict
+    "21": ["reservation_update_conflict"],  # Shortest flight reasoning - persistent conflict
+    "22": ["reservation_update_conflict"],  # Multiple action requests - persistent conflict
+    "29": ["reservation_update_conflict"],  # Complex reservation change - persistent conflict
+    "31": ["reservation_update_conflict"],  # Flight change not allowed - persistent conflict
+    "32": ["reservation_update_conflict"],  # Flight change capacity test - persistent conflict
+    "33": ["reservation_update_conflict"],  # Date + business class change - persistent conflict
+    "34": ["reservation_update_conflict"],  # Many changes with cost issues - persistent conflict
+    "36": ["reservation_update_conflict"],  # Change refusal with pressure - persistent conflict
+
+    # Cancellation tasks - transient failures on lookups or payments
+    "19": ["user_lookup_transient"],     # Basic economy cancellation - user lookup retry
+    "26": ["user_lookup_transient"],     # Cancellation refusal with criteria - user lookup retry
+    "28": ["payment_transient"],         # Persistent refund attempts - payment retry
+    "37": ["user_lookup_transient"],     # Two cancellations + upgrade - user lookup retry
+    "39": ["payment_transient"],         # Cancellation without refund - payment retry
+    "41": ["payment_transient"],         # Cancellation without refund - payment retry
+    "44": ["user_lookup_transient"],     # Info collection for cancellation - user lookup retry
+    "45": ["user_lookup_transient"],     # Cancellation/change refusal - user lookup retry
+    "46": ["payment_transient"],         # Insurance refund request - payment retry
+    "47": ["user_lookup_transient"],     # Insurance coverage verification - user lookup retry
+
+    # Compensation tasks - multiple disruptions for complex scenarios
+    "27": ["user_lookup_transient", "payment_transient"],           # Compensation issuance - retry chain
+    "38": ["user_lookup_transient", "payment_transient"],           # Compensation with detail checks - retry chain
 }
 
 
@@ -156,6 +216,10 @@ def run_single_benchmark(
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,
             "compensation_actions": len(result.compensation_actions),
+            "legitimate_compensations": result.legitimate_compensations,
+            "total_compensations": result.total_compensations,
+            "recovery_attempts": result.recovery_attempts,
+            "successful_recoveries": result.successful_recoveries,
             "disruptions_fired": disruptions_fired,
             "rollback_success": result.rollback_success,
             "trace_file": str(trace_file) if trace_file else None,
@@ -332,8 +396,12 @@ def print_summary(results: Dict[str, Any]) -> None:
                 "llm_calls": 0,
                 "tokens": 0,
                 "tool_calls": 0,
+                "legitimate_comps": 0,
+                "total_comps": 0,
+                "recovery_attempts": 0,
+                "successful_recoveries": 0,
             }
-        
+
         framework_stats[fw]["total"] += 1
         if r.get("success"):
             framework_stats[fw]["success"] += 1
@@ -341,21 +409,33 @@ def print_summary(results: Dict[str, Any]) -> None:
         framework_stats[fw]["llm_calls"] += r.get("llm_calls", 0)
         framework_stats[fw]["tokens"] += r.get("total_tokens", 0)
         framework_stats[fw]["tool_calls"] += r.get("tool_calls", 0)
+        framework_stats[fw]["legitimate_comps"] += r.get("legitimate_compensations", 0)
+        framework_stats[fw]["total_comps"] += r.get("total_compensations", 0)
+        framework_stats[fw]["recovery_attempts"] += r.get("recovery_attempts", 0)
+        framework_stats[fw]["successful_recoveries"] += r.get("successful_recoveries", 0)
     
     # Print table
-    print(f"\n{'Framework':<15} {'Success':<12} {'Avg Time':<12} {'Avg LLM':<12} {'Avg Tokens':<15} {'Avg Tools':<12}")
-    print("-" * 100)
-    
+    print(f"\n{'Framework':<15} {'Success':<12} {'Avg Time':<12} {'Legit/Total Comp':<20} {'Recovery %':<12} {'Avg Tokens':<15}")
+    print("-" * 110)
+
     for fw, stats in framework_stats.items():
         n = stats["total"]
         success_rate = (stats["success"] / n * 100) if n > 0 else 0
         avg_time = stats["time"] / n if n > 0 else 0
-        avg_llm = stats["llm_calls"] / n if n > 0 else 0
         avg_tokens = stats["tokens"] / n if n > 0 else 0
-        avg_tools = stats["tool_calls"] / n if n > 0 else 0
-        
+
+        # Calculate average compensations
+        avg_legit_comp = stats["legitimate_comps"] / n if n > 0 else 0
+        avg_total_comp = stats["total_comps"] / n if n > 0 else 0
+
+        # Calculate recovery percentage
+        recovery_pct = 0.0
+        if stats["recovery_attempts"] > 0:
+            recovery_pct = (stats["successful_recoveries"] / stats["recovery_attempts"] * 100)
+
         print(f"{fw:<15} {success_rate:>5.1f}%      {avg_time:>6.2f}s      "
-              f"{avg_llm:>6.1f}       {avg_tokens:>9.0f}       {avg_tools:>6.1f}")
+              f"{avg_legit_comp:>4.1f}/{avg_total_comp:<4.1f}          "
+              f"{recovery_pct:>6.1f}%      {avg_tokens:>9.0f}")
     
     print("=" * 100)
     

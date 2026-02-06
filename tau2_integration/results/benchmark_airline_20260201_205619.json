@@ -1,0 +1,33 @@
+{
+  "timestamp": "2026-02-01T20:56:17.794725",
+  "config": {
+    "domain": "airline",
+    "task_ids": [
+      "5"
+    ],
+    "frameworks": [
+      "rac"
+    ],
+    "trials": 1,
+    "model": "gemini-2.0-flash",
+    "tracing_enabled": true
+  },
+  "results": [
+    {
+      "framework": "rac",
+      "task_id": "5",
+      "trial": 1,
+      "success": true,
+      "execution_time": 2.008620023727417,
+      "tool_calls": 0,
+      "llm_calls": 1,
+      "input_tokens": 3693,
+      "output_tokens": 79,
+      "total_tokens": 3772,
+      "compensation_actions": 0,
+      "rollback_success": true,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_rac_5_trial1_1769959577.json",
+      "error": null
+    }
+  ]
+}

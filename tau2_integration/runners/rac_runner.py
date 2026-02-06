@@ -253,16 +253,28 @@ class RACRunner(BaseFrameworkRunner):
                 logger.info(f"[RAC]   Tool {i+1}: {tc.get('name')} - {tc.get('arguments')}")
             
             # Get compensation history from middleware if available
+            legitimate_comps = 0
+            total_comps = 0
             if middleware:
                 try:
                     log_snapshot = middleware.transaction_log.snapshot()
+                    disruption_engine = get_disruption_engine()
+                    triggered_tools = {d.get("tool") for d in disruption_engine.get_triggered_disruptions()}
+
                     for rid, record in log_snapshot.items():
                         status_str = str(record.status).lower() if hasattr(record, 'status') else ""
                         if 'compensated' in status_str:
+                            total_comps += 1
+                            # Check if this compensation was triggered by a disruption
+                            is_legitimate = record.action in triggered_tools
+                            if is_legitimate:
+                                legitimate_comps += 1
+
                             compensation_actions.append({
                                 "action": record.action,
                                 "status": str(record.status),
                                 "compensator": record.compensator,
+                                "is_legitimate": is_legitimate,
                             })
                         logger.info(f"[RAC] Transaction: {record.action} -> {record.status}")
                 except Exception as e:
@@ -270,7 +282,11 @@ class RACRunner(BaseFrameworkRunner):
             
             recorder.finish(status="success")
             recorder.pop_context()
-            
+
+            # Get recovery metrics from disruption engine
+            disruption_engine = get_disruption_engine()
+            recovery_metrics = disruption_engine.get_recovery_metrics()
+
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
@@ -279,6 +295,10 @@ class RACRunner(BaseFrameworkRunner):
                 tool_calls=tool_calls_made,
                 compensation_actions=compensation_actions,
                 rollback_success=True,
+                legitimate_compensations=legitimate_comps,
+                total_compensations=total_comps,
+                recovery_attempts=recovery_metrics["retry_attempts"],
+                successful_recoveries=recovery_metrics["successful_recoveries"],
                 messages=[self._message_to_dict(m) for m in all_messages],
                 raw_output=result,
                 trace=recorder.trace.to_dict(),

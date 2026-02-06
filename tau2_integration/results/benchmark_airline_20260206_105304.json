@@ -1,0 +1,34 @@
+{
+  "timestamp": "2026-02-06T10:52:46.956010",
+  "config": {
+    "domain": "airline",
+    "task_ids": [
+      "8"
+    ],
+    "frameworks": [
+      "langgraph"
+    ],
+    "trials": 1,
+    "model": "gemini-2.5-flash",
+    "tracing_enabled": true
+  },
+  "results": [
+    {
+      "framework": "langgraph",
+      "task_id": "8",
+      "trial": 1,
+      "success": true,
+      "execution_time": 17.05830407142639,
+      "tool_calls": 7,
+      "llm_calls": 8,
+      "input_tokens": 46691,
+      "output_tokens": 1647,
+      "total_tokens": 48338,
+      "compensation_actions": 0,
+      "disruptions_fired": 0,
+      "rollback_success": false,
+      "trace_file": "/Users/kaviru/Downloads/tau2-bench/tau2_integration/results/traces/airline/trace_langgraph_8_trial1_1770355366.json",
+      "error": null
+    }
+  ]
+}

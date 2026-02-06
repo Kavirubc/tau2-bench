@@ -482,6 +482,57 @@ class DisruptionEngine:
         """Check if any disruptions are configured."""
         return len(self._disruptions) > 0
 
+    def get_recovery_metrics(self) -> Dict[str, Any]:
+        """
+        Calculate recovery statistics for transient disruptions.
+
+        Returns:
+            {
+                "transient_disruptions": int,
+                "retry_attempts": int,
+                "successful_recoveries": int,
+                "recovery_percentage": float,
+            }
+        """
+        transient_count = 0
+        recovered_count = 0
+
+        # Track which disruptions are transient (payment_failure, system_error)
+        transient_types = ["payment_failure", "system_error"]
+
+        # Count transient disruptions and their recoveries
+        for key, attempt_count in self._transient_attempt_counts.items():
+            # Parse the key (format: "tool_name:disruption_type")
+            if ":" in key:
+                _, disruption_type = key.rsplit(":", 1)
+
+                # Check if this is a transient disruption type
+                if disruption_type in transient_types:
+                    # Find the corresponding disruption config
+                    matching_disruption = None
+                    for disruption in self._disruptions:
+                        if disruption.disruption_type == disruption_type:
+                            matching_disruption = disruption
+                            break
+
+                    if matching_disruption:
+                        transient_count += 1
+                        retries_needed = matching_disruption.transient_retries_until_success
+
+                        # If attempts exceeded retries needed, it recovered
+                        if attempt_count > retries_needed:
+                            recovered_count += 1
+
+        recovery_pct = (recovered_count / transient_count * 100) if transient_count > 0 else 0.0
+        total_attempts = sum(self._transient_attempt_counts.values())
+
+        return {
+            "transient_disruptions": transient_count,
+            "retry_attempts": total_attempts,
+            "successful_recoveries": recovered_count,
+            "recovery_percentage": recovery_pct,
+        }
+
 
 def get_disruption_engine() -> DisruptionEngine:
     """Get the singleton disruption engine instance."""

@@ -1,0 +1,12 @@
+{
+  "steps": [
+    {
+      "type": "llm",
+      "tokens": {
+        "input": 3880,
+        "output": 32,
+        "total": 3912
+      }
+    }
+  ]
+}
