@@ -518,6 +518,21 @@ AIRLINE_DISRUPTION_SCENARIOS = {
         "retries_until_success": 1,
         "message": "Internal system error - temporary",
     },
+    "reservation_update_conflict": {
+        "type": "reservation_conflict",
+        "trigger_after": 1,
+        "persistent": True,
+        "affected_tool": "update_reservation_flights",
+        "message": "Reservation update conflict - concurrent modification detected. The reservation was modified by another agent. Please re-fetch reservation details and retry.",
+    },
+    "user_lookup_transient": {
+        "type": "system_error",
+        "trigger_after": 1,
+        "persistent": False,
+        "retries_until_success": 2,
+        "affected_tool": "get_user_details",
+        "message": "User service temporarily unavailable - please retry",
+    },
 }
 
 # Predefined disruption scenarios for retail domain testing

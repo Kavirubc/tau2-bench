@@ -1,9 +1,13 @@
 """
 SagaLLM runner for τ²-bench.
 
-Implements the 3-phase plan-execute-compensate workflow from SagaLLM.
+Implements Plan → ReAct Execute → Compensate workflow from SagaLLM.
+Phase 1 (Planning) generates a structured plan via LLM.
+Phase 2 (Execution) uses a ReAct agent to follow the plan.
+Phase 3 (Compensation) rolls back on failure using compensation actions.
 """
 
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -22,45 +26,41 @@ except ImportError:
 except Exception as e:
     logging.warning(f"Langtrace initialization failed: {e}")
 
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.tools import StructuredTool
+
 from .base import BaseFrameworkRunner, RunnerResult
 from ..task_adapter import Tau2TaskDefinition, get_task_query
 from ..wrapped_tools import AIRLINE_COMPENSATION_MAPPING
+from ..disruption_engine import get_disruption_engine
 
 logger = logging.getLogger("tau2_integration.runners.saga")
 
 
 class SagaLLMRunner(BaseFrameworkRunner):
     """
-    SagaLLM runner implementing 3-phase execution.
-    
+    SagaLLM runner implementing Plan → ReAct Execute → Compensate.
+
     Phases:
-    1. Planning - Generate action plan
-    2. Execution - Execute plan with state tracking
+    1. Planning - Generate action plan via LLM
+    2. Execution - ReAct agent follows the plan using tools
     3. Compensation - Rollback on failure using compensation actions
     """
-    
+
     framework_name = "sagallm"
-    
+
     def __init__(
         self,
         model: str = "gemini-2.0-flash",
-        max_iterations: int = 25,
+        max_iterations: int = 3,
         enable_replanning: bool = True,
         **kwargs
     ):
-        """
-        Initialize the SagaLLM runner.
-
-        Args:
-            model: LLM model to use (Gemini model name).
-            max_iterations: Maximum execution iterations.
-            enable_replanning: Enable replanning after compensation.
-        """
         super().__init__(model=model, **kwargs)
         self.max_iterations = max_iterations
         self.enable_replanning = enable_replanning
         self._executed_actions = []
-    
+
     def run_task(
         self,
         task: Tau2TaskDefinition,
@@ -68,49 +68,32 @@ class SagaLLMRunner(BaseFrameworkRunner):
         policy: str,
     ) -> RunnerResult:
         """
-        Run a task using SagaLLM with workflow generation (CORRECTED - Paper-Compliant).
-
-        Phases:
-        1. Planning - Generate action plan
-        2. Workflow Generation - Build LangGraph workflow with LLM tool calling
-        3. Execution - LLM decides which tools to call at runtime
-        4. Compensation - Roll back on failure
-
-        This matches REALM-Bench's actual implementation.
-
-        Args:
-            task: Task definition.
-            tools: Dictionary of tool functions.
-            policy: Policy text for the agent.
-
-        Returns:
-            RunnerResult with execution details.
+        Run a task using SagaLLM: Plan → ReAct Execute → Compensate.
         """
         try:
             from langchain_google_genai import ChatGoogleGenerativeAI
-            from langchain_core.messages import HumanMessage, SystemMessage
-        except ImportError:
-            logger.error("langchain-google-genai not installed")
+            from langgraph.prebuilt import create_react_agent
+        except ImportError as e:
+            logger.error(f"Required packages not installed: {e}")
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
                 success=False,
                 execution_time=0,
-                error="langchain-google-genai not installed",
+                error=f"Required packages not installed: {e}",
             )
-        
+
         self._executed_actions = []
-        
+
         # Initialize TraceRecorder
         from ..tracing import TraceRecorder
         from ..callbacks import TracingCallbackHandler
-        from ..saga_workflow_builder import SagaWorkflowBuilder, SagaState
-        
+
         recorder = TraceRecorder(task_id=task.task_id, framework="sagallm")
         tracing_handler = TracingCallbackHandler(recorder)
 
         try:
-            # Setup Langsmith tracing
+            # Setup callbacks
             callbacks = [tracing_handler]
             try:
                 from langchain_core.tracers import LangChainTracer
@@ -122,23 +105,20 @@ class SagaLLMRunner(BaseFrameworkRunner):
                     callbacks.append(tracer)
             except Exception as e:
                 logger.debug(f"Langsmith tracer not available: {e}")
-            
-            # Configure run metadata for Langsmith
+
             run_config = {
                 "run_name": f"SagaLLM-Task-{task.task_id}",
-                "tags": ["tau2-bench", "SagaLLM", "framework:SagaLLM", f"task-{task.task_id}", "workflow-generation"],
+                "tags": ["tau2-bench", "SagaLLM", "framework:SagaLLM", f"task-{task.task_id}"],
                 "metadata": {
                     "task_id": task.task_id,
                     "task_name": task.name,
                     "framework": "SagaLLM",
-                    "framework_name": "SagaLLM (Paper-Compliant with Workflow Generation)",
                     "model": self.model,
                     "enable_replanning": self.enable_replanning,
-                    "workflow_generation": True,
                 },
                 "callbacks": callbacks,
             }
-            
+
             llm = ChatGoogleGenerativeAI(
                 model=self.model,
                 temperature=0,
@@ -146,159 +126,139 @@ class SagaLLMRunner(BaseFrameworkRunner):
                 callbacks=callbacks,
             )
 
+            # Convert tools to langchain format with disruption-aware wrappers
+            langchain_tools = self._convert_tools(tools)
+
             iteration = 0
-            failure_context = []
             all_tool_calls = []
             all_compensation_actions = []
-            
+
             # Initialize Persistent Context
             from ..persistent_context import PersistentExecutionContext
             persistent_ctx = PersistentExecutionContext()
-            
+
             while iteration < self.max_iterations:
                 iteration += 1
                 logger.info(f"=== SagaLLM Iteration {iteration}/{self.max_iterations} ===")
-                
+
                 try:
-                    # ============================================================
+                    # ==========================================================
                     # PHASE 1: PLANNING (or REPLANNING)
-                    # ============================================================
-                    logger.info("Phase 1: Planning / Replanning")
-                    
-                    # Update run name for iteration
+                    # ==========================================================
+                    logger.info("Phase 1: Planning")
+                    recorder.push_context({"phase": "planning", "iteration": iteration})
                     run_config["run_name"] = f"SagaLLM-Task-{task.task_id}-Iter{iteration}"
-                    
+
                     plan = None
                     if iteration == 1:
-                        # First attempt: Fresh plan
                         persistent_ctx.original_plan = self._generate_plan(llm, task, tools, policy, run_config)
                         plan = persistent_ctx.original_plan
                     else:
-                        # Subsequent attempts: Strategic Replan
-                        plan = self._generate_replan_with_context(llm, task, persistent_ctx, run_config)
-                    
+                        logger.info(f"Replanning with failure history: {persistent_ctx.failures[-1]['reason']}")
+                        recorder.record_event("saga_strategic_replan_start", {"failure": persistent_ctx.failures[-1]})
+                        failure_msgs = [
+                            f"Attempt {f['attempt']} failed at tool '{f['failed_tool']}' with error: {f['reason']}"
+                            for f in persistent_ctx.failures
+                        ]
+                        plan = self._generate_plan(llm, task, tools, policy, run_config, failure_context=failure_msgs)
+                        if plan:
+                            recorder.record_event("saga_strategic_replan_success", {"new_plan_steps": len(plan)})
+                        else:
+                            recorder.record_event("saga_strategic_replan_failed")
+
+                    recorder.pop_context()
+
                     if not plan:
                         logger.warning("Planning failed, stopping.")
                         break
-                    
-                    # Store plan in context if it's the first one
+
                     if not persistent_ctx.original_plan:
                         persistent_ctx.original_plan = plan
 
-                    # ============================================================
-                    # PHASE 2: WORKFLOW GENERATION
-                    # ============================================================
-                    logger.info("Phase 2: Workflow Generation")
-                    
-                    workflow_step_id = recorder.start_step("workflow_generation", "saga_phase2", {"plan_steps": len(plan)})
-                    
+                    # ==========================================================
+                    # PHASE 2: EXECUTION via ReAct Agent
+                    # ==========================================================
+                    logger.info("Phase 2: ReAct Execution")
+                    recorder.push_context({"phase": "execution", "iteration": iteration})
+                    execution_step_id = recorder.start_step("execution", "saga_react_execute", {"plan_steps": len(plan)})
+
+                    # Reset executed actions for this iteration
+                    self._executed_actions = []
+
                     try:
-                        builder = SagaWorkflowBuilder(model=self.model)
-                        workflow = builder.build_workflow(plan, tools, llm)
-                        recorder.end_step(workflow_step_id, output={"nodes": len(plan) + 2})
+                        # Build execution system prompt with the plan
+                        formatted_plan = self._format_plan_for_execution(plan)
+                        exec_system_prompt = f"""{self.build_system_prompt(policy)}
+
+You are executing a pre-planned action sequence. Follow this plan step by step:
+
+{formatted_plan}
+
+Use the available tools to execute each step. After each tool call, evaluate the result and proceed to the next step.
+If a step fails, report the failure clearly.
+IMPORTANT: Execute ALL steps in the plan. Do not stop early.
+"""
+                        # Create ReAct agent
+                        agent = create_react_agent(llm, langchain_tools)
+
+                        user_query = get_task_query(task)
+                        messages = [
+                            SystemMessage(content=exec_system_prompt),
+                            HumanMessage(content=user_query),
+                        ]
+
+                        result = agent.invoke(
+                            {"messages": messages},
+                            config=run_config,
+                        )
+
+                        all_messages = result.get("messages", [])
+                        iter_tool_calls = self._extract_tool_calls(all_messages)
+                        all_tool_calls.extend(iter_tool_calls)
+
+                        logger.info(f"ReAct execution completed with {len(iter_tool_calls)} tool calls")
+                        for i, tc in enumerate(iter_tool_calls):
+                            logger.info(f"  Tool {i+1}: {tc.get('name')} - {tc.get('arguments')}")
+
+                        recorder.end_step(execution_step_id, output={"success": True, "tool_calls": len(iter_tool_calls)})
+                        recorder.finish(status="success")
+                        recorder.pop_context()
+
+                        return RunnerResult(
+                            task_id=task.task_id,
+                            framework=self.framework_name,
+                            success=True,
+                            execution_time=0,
+                            tool_calls=all_tool_calls,
+                            messages=[self._message_to_dict(m) for m in all_messages],
+                            raw_output=result,
+                            trace=recorder.trace.to_dict(),
+                        )
+
                     except Exception as e:
-                        logger.error(f"Workflow generation failed: {e}")
-                        recorder.end_step(workflow_step_id, output=None, error=str(e))
-                        raise
-                    
-                    # ============================================================
-                    # PHASE 3: EXECUTION
-                    # ============================================================
-                    logger.info("Phase 3: Execution")
-                    
-                    execution_step_id = recorder.start_step("execution", "saga_phase3", {"tasks": len(plan)})
-                    
-                    try:
-                        # Initial state
-                        initial_state: SagaState = {
-                            "messages": [HumanMessage(content=f"{task.name}: {task.description}")],
-                            "task_data": {},
-                            "current_task": "",
-                            "completed_tasks": [],
-                            "failed_tasks": [],
-                            "task_results": {},
-                            "task_outputs": {},
-                            "compensation_stack": [],
-                            "saga_status": "active",
-                            "failure_reason": "",
-                            "failed_tool": ""
-                        }
-                        
-                        # Run workflow
-                        final_state = None
-                        for event in workflow.stream(initial_state):
-                            for node, state in event.items():
-                                logger.info(f"[Workflow] Node: {node}")
-                                final_state = state
-                        
-                        # Process Result
-                        if final_state:
-                            saga_status = final_state.get('saga_status', 'active')
-                            compensation_stack = final_state.get('compensation_stack', [])
-                            
-                            # Collect outputs
-                            all_tool_calls.extend(compensation_stack)
-                            
-                            if saga_status == 'failed':
-                                # Failed!
-                                failure_reason = final_state.get('failure_reason', 'Unknown error')
-                                failed_tool = final_state.get('failed_tool', 'Unknown')
-                                
-                                logger.warning(f"Execution failed: {failure_reason}")
-                                recorder.end_step(execution_step_id, output={"success": False, "reason": failure_reason})
-                                
-                                # Record failure in persistent context
-                                persistent_ctx.add_failure(
-                                    reason=failure_reason, 
-                                    failed_tool=failed_tool,
-                                    tool_args=final_state.get('task_data', {}), # Approximate args
-                                    attempt=iteration
-                                )
-                                persistent_ctx.replan_count += 1
-                                
-                                if self.enable_replanning:
-                                    logger.info("Preparing to replan with persistent context...")
-                                else:
-                                    logger.info("Replanning disabled. Stopping.")
-                                    break
-                            else:
-                                # Success!
-                                logger.info("Execution successful!")
-                                recorder.end_step(execution_step_id, output={"success": True})
-                                recorder.finish(status="success")
-                                
-                                # Extract clean tool calls
-                                tool_calls_list = []
-                                for tc in all_tool_calls:
-                                    tool_calls_list.append({
-                                        "tool": tc.get('tool'),
-                                        "args": tc.get('args'),
-                                        "status": "completed"
-                                    })
-                                
-                                return RunnerResult(
-                                    task_id=task.task_id,
-                                    framework=self.framework_name,
-                                    success=True,
-                                    execution_time=0,
-                                    tool_calls=tool_calls_list,
-                                    messages=[],
-                                    raw_output={"final_state": final_state},
-                                    trace=recorder.trace.to_dict(),
-                                )
-                        else:
-                            logger.error("No final state")
-                            break
-                            
-                    except Exception as e:
-                        logger.error(f"Execution exception: {e}")
+                        logger.error(f"ReAct execution failed: {e}")
                         recorder.end_step(execution_step_id, output=None, error=str(e))
+                        recorder.pop_context()
+
+                        # Phase 3: Compensation
+                        if self._executed_actions:
+                            logger.info("Phase 3: Compensation")
+                            recorder.push_context({"phase": "compensation", "iteration": iteration})
+                            comp_result = self._compensate(tools, recorder)
+                            all_compensation_actions.extend(comp_result.get("actions", []))
+                            recorder.pop_context()
+
                         persistent_ctx.add_failure(str(e), "unknown", {}, iteration)
-                        
+                        persistent_ctx.replan_count += 1
+
+                        if not self.enable_replanning:
+                            logger.info("Replanning disabled. Stopping.")
+                            break
+
                 except Exception as e:
                     logger.error(f"Iteration {iteration} failed: {e}")
-            
-            # End of loop (max iterations)
+
+            # End of loop
             recorder.finish(status="failed", metadata={"error": "Max iterations reached"})
             return RunnerResult(
                 task_id=task.task_id,
@@ -311,16 +271,14 @@ class SagaLLMRunner(BaseFrameworkRunner):
                 trace=recorder.trace.to_dict(),
             )
 
-
-            
         except Exception as e:
             logger.error(f"SagaLLM runner failed: {e}")
             if 'recorder' in locals():
-                 recorder.finish(status="failed", metadata={"error": str(e)})
-                 trace_dict = recorder.trace.to_dict()
+                recorder.finish(status="failed", metadata={"error": str(e)})
+                trace_dict = recorder.trace.to_dict()
             else:
-                 trace_dict = None
-            
+                trace_dict = None
+
             return RunnerResult(
                 task_id=task.task_id,
                 framework=self.framework_name,
@@ -394,6 +352,11 @@ META-STRATEGIES (Use these to structure your plan):
         if failure_context:
             error_history = "\n".join([f"- {err}" for err in failure_context])
             planning_prompt += f"\n\nCRITICAL: Previous attempts failed. Improve your plan based on these errors:\n{error_history}\n"
+
+            # Add full signatures for failed tools to help the LLM fix argument issues
+            failed_tool_sigs = self._extract_failed_tool_signatures(failure_context, tools)
+            if failed_tool_sigs:
+                planning_prompt += f"\nThe following tools had failures. Here are their EXACT required signatures:\n{failed_tool_sigs}\nYou MUST use exactly these argument names.\n"
         
         try:
             # Trace LLM call manually
@@ -411,7 +374,6 @@ META-STRATEGIES (Use these to structure your plan):
             ])
             
             # Parse plan from response
-            import json
             content = response.content.strip()
             
             # Try to extract JSON from response
@@ -428,148 +390,108 @@ META-STRATEGIES (Use these to structure your plan):
             logger.error(f"Planning failed: {e}")
             return None
     
-    def _execute_plan(
-        self,
-        llm: Any,
-        plan: List[Dict[str, Any]],
-        tools: Dict[str, Any],
-        policy: str,
-        recorder: Any = None,
-    ) -> Dict[str, Any]:
-        """
-        Execute the generated plan.
+    def _convert_tools(self, tools: Dict[str, Any]) -> List[StructuredTool]:
+        """Convert τ²-bench tools to LangChain StructuredTool format with disruption checking and action tracking."""
+        langchain_tools = []
 
-        Args:
-            llm: LLM instance.
-            plan: List of planned actions.
-            tools: Available tools.
-            policy: Policy text.
-
-        Returns:
-            Execution result dictionary.
-        """
-        from ..wrapped_tools import ToolExecutionError
-        
-        messages = []
-        step_results = {} # Map step number -> raw result for substitution
-        
-        for idx, step in enumerate(plan):
-            tool_name = step.get("tool")
-            tool_args = step.get("args", {})
-            step_num = step.get("step")
-            if step_num is None:
-                step_num = idx + 1
-            
-            # Substitute placeholders with actual results using step_results
-            for arg_key, arg_val in tool_args.items():
-                if isinstance(arg_val, str):
+        for name, func in tools.items():
+            def create_wrapper(f, tool_name):
+                def wrapped_func(**kwargs):
                     try:
-                        # New style: {{flight_id_from_step_1}}
-                        if "from_step_" in arg_val:
-                            import re
-                            match = re.search(r"from_step_(\d+)", arg_val)
-                            if match:
-                                ref_step = int(match.group(1))
-                                
-                                if ref_step in step_results:
-                                    prev_result = step_results[ref_step]
-                                    
-                                    # Handle different result types (list vs dict)
-                                    if isinstance(prev_result, list) and len(prev_result) > 0:
-                                        # If previous result is a list (like search_flights), pick the first item
-                                        item = prev_result[0]
-                                        if isinstance(item, dict):
-                                            # Try to match key requested
-                                            if "flight_id" in arg_key or "id" in arg_key:
-                                                tool_args[arg_key] = item.get("id") or item.get("flight_id")
-                                    elif isinstance(prev_result, dict):
-                                        # If previous result is a dict (like book_flight)
-                                        if "booking_id" in arg_key:
-                                            tool_args[arg_key] = prev_result.get("booking_id")
-                                        elif "payment_id" in arg_key:
-                                            tool_args[arg_key] = prev_result.get("transaction_id")
-                        
-                        # Old style: RESULT_FROM_STEP_1
-                        elif "RESULT_FROM_STEP_" in arg_val:
-                             ref_str = arg_val.replace("RESULT_FROM_STEP_", "")
-                             ref_step = int(ref_str)
-                             pass 
+                        # Check for disruptions
+                        disruption_engine = get_disruption_engine()
+                        disruption_error = disruption_engine.check_disruption(tool_name, kwargs)
+                        if disruption_error:
+                            return f'{{"status": "failed", "error": "{disruption_error}"}}'
 
+                        result = f(**kwargs)
+
+                        # Track executed action for compensation
+                        self._executed_actions.append({
+                            "tool": tool_name,
+                            "args": kwargs,
+                            "result": str(result)[:500],
+                        })
+
+                        return self._normalize_tool_output(result, tool_name)
                     except Exception as e:
-                        logger.warning(f"Failed to substitute placeholder {arg_val}: {e}")
-            
-            if tool_name not in tools:
-                logger.warning(f"Unknown tool: {tool_name}")
-                continue
-            
+                        return f'{{"status": "failed", "error": "{str(e)}"}}'
+                return wrapped_func
+
+            wrapped = create_wrapper(func, name)
+            tool = StructuredTool.from_function(
+                func=wrapped,
+                name=name,
+                description=func.__doc__ or f"Tool: {name}",
+            )
+            langchain_tools.append(tool)
+
+        return langchain_tools
+
+    def _normalize_tool_output(self, result: Any, tool_name: str) -> str:
+        """Normalize tool output to clean JSON string."""
+        if isinstance(result, dict):
+            if "error" in result and result["error"]:
+                result["status"] = "failed"
+            return json.dumps(result)
+
+        if isinstance(result, str):
             try:
-                # Record tool start
-                step_id = None
-                if recorder:
-                    step_id = recorder.start_step("tool", tool_name, tool_args)
-                
-                # Execute the tool
-                if hasattr(tools[tool_name], "invoke"):
-                    result = tools[tool_name].invoke(tool_args)
-                else:
-                    result = tools[tool_name](**tool_args)
-                
-                # Record tool end
-                if recorder and step_id:
-                    recorder.end_step(step_id, output=str(result))
-                
-                # Store raw result for future steps
-                if step_num is not None:
-                    step_results[step_num] = result
-                
-                # Check for logical failure (e.g. status='failed')
-                if isinstance(result, dict):
-                    if result.get("status") == "failed":
-                        error_msg = result.get("error", "Tool reported failure")
-                        raise ToolExecutionError(error_msg)
-                    if "error" in result and result["error"]:
-                        raise ToolExecutionError(result["error"])
-                
-                # Track executed action
-                self._executed_actions.append({
-                    "step": step.get("step"),
-                    "tool": tool_name,
-                    "args": tool_args,
-                    "result": str(result)[:500],  # Truncate for storage
-                })
-                
-                messages.append({
-                    "role": "tool",
-                    "tool": tool_name,
-                    "content": str(result),
-                })
-                
-            except ToolExecutionError as e:
-                logger.warning(f"Tool {tool_name} failed: {e}")
-                if recorder and step_id:
-                    recorder.end_step(step_id, output=None, error=str(e))
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "failed_step": step.get("step"),
-                    "messages": messages,
-                }
-            except Exception as e:
-                logger.error(f"Tool {tool_name} raised exception: {e}")
-                if recorder and step_id:
-                    recorder.end_step(step_id, output=None, error=str(e))
-                return {
-                    "success": False,
-                    "error": str(e),
-                    "failed_step": step.get("step"),
-                    "messages": messages,
-                }
-        
-        return {
-            "success": True,
-            "messages": messages,
-        }
-    
+                cleaned = result.strip()
+                if not cleaned.startswith("{") and "error" in cleaned.lower():
+                    return json.dumps({"status": "failed", "error": cleaned})
+                parsed = json.loads(cleaned)
+                if isinstance(parsed, dict):
+                    if "error" in parsed and parsed["error"]:
+                        parsed["status"] = "failed"
+                    return json.dumps(parsed)
+            except (json.JSONDecodeError, ValueError):
+                if "fail" in result.lower() or "error" in result.lower():
+                    return json.dumps({"status": "failed", "error": result[:200]})
+
+        return str(result)
+
+    def _format_plan_for_execution(self, plan: List[Dict[str, Any]]) -> str:
+        """Format the plan as numbered steps for the ReAct agent's system prompt."""
+        lines = []
+        for i, step in enumerate(plan, 1):
+            tool = step.get("tool", "unknown")
+            args = step.get("args", {})
+            reasoning = step.get("reasoning", "")
+            line = f"Step {i}: Call {tool}({json.dumps(args)})"
+            if reasoning:
+                line += f" — {reasoning}"
+            lines.append(line)
+        return "\n".join(lines)
+
+    def _extract_tool_calls(self, messages: List[Any]) -> List[Dict[str, Any]]:
+        """Extract tool calls from ReAct message history."""
+        tool_calls = []
+        for msg in messages:
+            if hasattr(msg, "tool_calls") and msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tool_calls.append({
+                        "name": tc.get("name"),
+                        "arguments": tc.get("args", {}),
+                    })
+        return tool_calls
+
+    def _message_to_dict(self, msg: Any) -> Dict[str, Any]:
+        """Convert a message to dictionary format."""
+        result = {}
+        if hasattr(msg, "type"):
+            result["type"] = msg.type
+        if hasattr(msg, "content"):
+            result["content"] = str(msg.content)[:500]
+        if hasattr(msg, "tool_calls") and msg.tool_calls:
+            result["tool_calls"] = [
+                {"name": tc.get("name"), "args": tc.get("args", {})}
+                for tc in msg.tool_calls
+            ]
+        if hasattr(msg, "name"):
+            result["name"] = msg.name
+        return result
+
     def _compensate(self, tools: Dict[str, Any], recorder: Any = None) -> Dict[str, Any]:
         """
         Execute compensation actions for executed actions (in reverse order).
@@ -664,11 +586,67 @@ META-STRATEGIES (Use these to structure your plan):
         return None
     
     def _format_tool_descriptions(self, tools: Dict[str, Any]) -> str:
-        """Format tool descriptions for the planning prompt."""
+        """Format tool descriptions for the planning prompt with full signatures."""
+        import inspect
         descriptions = []
-        
+
         for name, func in tools.items():
             doc = func.__doc__ or "No description"
-            descriptions.append(f"- {name}: {doc[:200]}")
-        
+
+            # Extract full function signature with parameter names and types
+            try:
+                sig = inspect.signature(func)
+                params = []
+                for pname, param in sig.parameters.items():
+                    if pname == "self":
+                        continue
+                    anno = param.annotation
+                    if anno is inspect.Parameter.empty:
+                        params.append(pname)
+                    else:
+                        type_name = getattr(anno, "__name__", str(anno))
+                        params.append(f"{pname}: {type_name}")
+                sig_str = f"{name}({', '.join(params)})"
+            except (ValueError, TypeError):
+                sig_str = name
+
+            descriptions.append(f"- {sig_str}\n  {doc.strip()}")
+
         return "\n".join(descriptions)
+
+    def _extract_failed_tool_signatures(
+        self, failure_context: List[str], tools: Dict[str, Any]
+    ) -> str:
+        """Extract full signatures for tools that failed in previous attempts."""
+        import inspect
+        import re
+
+        failed_tools = set()
+        for msg in failure_context:
+            match = re.search(r"tool '(\w+)'", msg)
+            if match:
+                failed_tools.add(match.group(1))
+
+        sigs = []
+        for tool_name in failed_tools:
+            if tool_name not in tools:
+                continue
+            func = tools[tool_name]
+            doc = func.__doc__ or ""
+            try:
+                sig = inspect.signature(func)
+                params = []
+                for pname, param in sig.parameters.items():
+                    if pname == "self":
+                        continue
+                    anno = param.annotation
+                    if anno is inspect.Parameter.empty:
+                        params.append(pname)
+                    else:
+                        type_name = getattr(anno, "__name__", str(anno))
+                        params.append(f"{pname}: {type_name}")
+                sigs.append(f"- {tool_name}({', '.join(params)})\n  {doc.strip()}")
+            except (ValueError, TypeError):
+                sigs.append(f"- {tool_name}: {doc.strip()}")
+
+        return "\n".join(sigs)

@@ -27,9 +27,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool as langchain_tool
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+from langchain_core.tools import StructuredTool
+
 from .base import BaseFrameworkRunner, RunnerResult
 from ..task_adapter import Tau2TaskDefinition, get_task_query
 from ..wrapped_tools import ToolExecutionError
+from ..disruption_engine import get_disruption_engine
 
 logger = logging.getLogger("tau2_integration.runners.langgraph")
 
@@ -190,15 +193,26 @@ class LangGraphRunner(BaseFrameworkRunner):
             )
     
     def _convert_tools(self, tools: Dict[str, Any]) -> List[Any]:
-        """Convert tool dictionary to langchain tools."""
+        """Convert tool dictionary to langchain tools with disruption checking."""
+        import functools
         langchain_tools = []
-        
+
         for name, func in tools.items():
-            # Create a langchain tool from the function
-            wrapped = langchain_tool(func)
-            wrapped.name = name
-            langchain_tools.append(wrapped)
-        
+            def create_wrapper(f, tool_name):
+                @functools.wraps(f)
+                def wrapped_func(*args, **kwargs):
+                    disruption_engine = get_disruption_engine()
+                    disruption_error = disruption_engine.check_disruption(tool_name, kwargs)
+                    if disruption_error:
+                        return f'{{"status": "failed", "error": "{disruption_error}"}}'
+                    return f(*args, **kwargs)
+                return wrapped_func
+
+            wrapped = create_wrapper(func, name)
+            tool = langchain_tool(wrapped)
+            tool.name = name
+            langchain_tools.append(tool)
+
         return langchain_tools
     
     def _extract_tool_calls_from_messages(

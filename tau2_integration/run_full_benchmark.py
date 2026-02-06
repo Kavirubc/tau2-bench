@@ -41,6 +41,7 @@ from tau2_integration.runners.saga_runner import SagaLLMRunner
 from tau2_integration.runners.prompt_engineer_langgraph_runner import PromptEngineerLangGraphRunner
 from tau2_integration.evaluation import evaluate_run, compare_frameworks, print_comparison_table, EvaluationMetrics
 from tau2_integration.domain_registry import DomainRegistry
+from tau2_integration.disruption_engine import AIRLINE_DISRUPTION_SCENARIOS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -55,6 +56,16 @@ DEFAULT_TRACE_DIR = Path(__file__).parent / "results" / "traces"
 # Default model and domain
 DEFAULT_MODEL = "gemini-2.0-flash"
 DEFAULT_DOMAIN = "airline"
+
+# Task-specific disruption mapping
+# Maps Task ID -> List of disruption scenario names from disruption_engine.py
+TASK_DISRUPTION_MAP = {
+    "3": ["user_lookup_transient"],                          # Transient: agent must retry get_user_details
+    "5": ["user_lookup_transient"],                          # Transient: agent must retry
+    "7": ["user_lookup_transient"],                          # Transient: agent must retry
+    "8": ["flight_unavailable"],                             # Persistent: book_reservation always fails
+    "9": ["reservation_update_conflict"],                    # Persistent: update_reservation_flights always fails
+}
 
 
 def load_domain_tools(domain: str):
@@ -88,6 +99,7 @@ def run_single_benchmark(
     policy,
     trial: int,
     trace_dir: Path,
+    disruption_scenarios: List[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Run a single benchmark trial."""
     logger.info(f"  [{framework_name}] Trial {trial}: {task.task_id}")
@@ -99,7 +111,7 @@ def run_single_benchmark(
             task=task,
             tools=tools,
             policy=policy,
-            disruption_scenarios=None,
+            disruption_scenarios=disruption_scenarios,
         )
         
         execution_time = time.time() - start_time
@@ -128,6 +140,10 @@ def run_single_benchmark(
                 output_tokens += tokens.get("output", 0)
                 total_tokens += tokens.get("total", 0)
         
+        disruptions_fired = len(result.disruptions_triggered) if result.disruptions_triggered else 0
+        if disruptions_fired:
+            logger.info(f"    Disruptions fired: {disruptions_fired}")
+
         return {
             "framework": framework_name,
             "task_id": task.task_id,
@@ -140,6 +156,7 @@ def run_single_benchmark(
             "output_tokens": output_tokens,
             "total_tokens": total_tokens,
             "compensation_actions": len(result.compensation_actions),
+            "disruptions_fired": disruptions_fired,
             "rollback_success": result.rollback_success,
             "trace_file": str(trace_file) if trace_file else None,
             "error": result.error,
@@ -166,6 +183,7 @@ def run_full_benchmark(
     trials: int = 1,
     model: str = DEFAULT_MODEL,
     output_dir: Path = None,
+    disruptions: bool = False,
 ) -> Dict[str, Any]:
     """
     Run comprehensive benchmark across all frameworks for a specific domain.
@@ -252,6 +270,14 @@ def run_full_benchmark(
                 current_run += 1
                 print(f"\n[{current_run}/{total_runs}] Running {framework_name} on {task.task_id} (trial {trial}/{trials})")
                 
+                # Determine disruption scenarios for this task
+                # Determine disruption scenarios for this task
+                scenarios = None
+                if disruptions and task.task_id in TASK_DISRUPTION_MAP:
+                    scenario_names = TASK_DISRUPTION_MAP[task.task_id]
+                    scenarios = [AIRLINE_DISRUPTION_SCENARIOS[name] for name in scenario_names if name in AIRLINE_DISRUPTION_SCENARIOS]
+                    print(f"  ⚡ Injecting disruptions: {scenario_names} -> {len(scenarios)} scenarios")
+
                 result = run_single_benchmark(
                     framework_name=framework_name,
                     runner=runner,
@@ -260,6 +286,7 @@ def run_full_benchmark(
                     policy=policy,
                     trial=trial,
                     trace_dir=trace_dir,
+                    disruption_scenarios=scenarios
                 )
                 
                 results["results"].append(result)
@@ -366,13 +393,13 @@ def main():
         "--tasks", "-t",
         type=str,
         help="Task IDs to run (comma-separated)",
-        default="5,6,8,9",
+        default="0,1,3,5,8,15,20,28,32,39",
     )
     parser.add_argument(
         "--frameworks", "-f",
         type=str,
         help="Frameworks to test (comma-separated)",
-        default="langgraph,rac,sagallm",
+        default="langgraph,rac,sagallm,prompt_engineer_langgraph",
     )
     parser.add_argument(
         "--trials", "-n",
@@ -393,7 +420,20 @@ def main():
         default=None,
     )
     
+    parser.add_argument(
+        "--disruptions", 
+        action="store_true", 
+        help="Enable disruption scenarios for compensation testing"
+    )
+    
     args = parser.parse_args()
+    
+    
+    # Load scenarios if enabled
+    disruption_config = None
+    if args.disruptions:
+        logger.warning("⚠️  DISRUPTION MODE ENABLED - Agents will face failures! ⚠️")
+        from tau2_integration.disruption_engine import AIRLINE_DISRUPTION_SCENARIOS
     
     # Validate domain
     valid_domains = DomainRegistry.list_domains()
@@ -413,6 +453,7 @@ def main():
         trials=args.trials,
         model=args.model,
         output_dir=output_dir,
+        disruptions=args.disruptions,
     )
 
 
